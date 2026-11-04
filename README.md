@@ -6,6 +6,16 @@
 
 > 一个本地入口，背后是几万个随机出口；分流规则仍然在你自己的客户端里配。
 
+## 下载
+
+安装包在 [Releases](https://github.com/jiema123/URnetworkProxy/releases/latest) 里（不放进 git 历史，避免仓库被几十 MB 的二进制撑大）：
+
+| 平台 | 文件 |
+| --- | --- |
+| macOS（Intel + Apple Silicon 通用） | `urnetd-x.y.z.dmg` |
+| Linux amd64 | `urnetd-linux-amd64.tar.gz` |
+| Linux arm64 | `urnetd-linux-arm64.tar.gz` |
+
 ---
 
 ## 为什么需要它
@@ -46,7 +56,7 @@ URnetwork 是 P2P 网络：出口是你家宽带上的**真人设备**，地址�
 
 ### macOS（dmg）
 
-1. 下载 `urnetd-x.y.z.dmg`，把 **URnetwork Console.app** 拖进「应用程序」
+1. 从 [Releases](https://github.com/jiema123/URnetworkProxy/releases/latest) 下载 `urnetd-x.y.z.dmg`，把 **URnetwork Console.app** 拖进「应用程序」
 2. 首次打开要绕过 Gatekeeper（无 Apple 开发者签名）：右键 app →「打开」→ 再点「打开」
 3. 它会起服务并打开浏览器（默认 `http://127.0.0.1:8877`），**第一次会引导你设一个面板密码**
 4. 到面板里粘授权码、选地区、扫码导入节点
@@ -58,6 +68,8 @@ app 是纯后台服务（`LSUIElement`），没有 Dock 图标也没有菜单栏
 - 或者再双击一次 app —— 检测到已在运行会直接打开面板
 
 ### Linux（tar.gz）
+
+从 [Releases](https://github.com/jiema123/URnetworkProxy/releases/latest) 下载对应架构的包：
 
 ```bash
 sudo mkdir -p /opt/urnetd
