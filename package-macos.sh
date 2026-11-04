@@ -16,7 +16,7 @@ cd "$(dirname "$0")"
 
 APP_NAME="URnetwork Console"
 BUNDLE_ID="com.fangjiefeng.urnetd"
-VERSION="1.0.0"
+VERSION="${VERSION:-1.0.0}"
 DIST="dist"
 APP="$DIST/$APP_NAME.app"
 SOCKS_SRC="${SOCKS_SRC:-/Users/fangjiefeng/WorkBuddy/2026-11-04-13-19-01/urnet/proxy/socks}"

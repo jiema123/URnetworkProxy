@@ -15,7 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION="1.0.0"
+VERSION="${VERSION:-1.0.0}"
 DIST="linux"
 SOCKS_SRC="${SOCKS_SRC:-/Users/fangjiefeng/WorkBuddy/2026-11-04-13-19-01/urnet/proxy/socks}"
 SOCKS_FALLBACK="$HOME/Dev/personal/tools/bin/socksproxy"
