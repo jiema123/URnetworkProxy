@@ -91,17 +91,24 @@ sudo loginctl enable-linger $USER   # 没登录会话也让服务常驻
 
 ### Windows（zip）
 
-1. 解压到任意目录（例如 `D:\urnetd`），双击 `urnetd.exe`
-   - 出现 SmartScreen 提示就点「更多信息 → 仍要运行」
-2. 它会起服务并打开浏览器（`http://127.0.0.1:8877`），第一次会让你设面板密码
-3. 拿授权码粘到面板「节点 → 换凭据」里
+1. 解压到任意目录（例如 `D:\urnetd`），**两个 exe 必须放在同一个文件夹**
+2. 双击 `1-start.bat`（或直接双击 `urnetd.exe`）；出现 SmartScreen 提示就点「更多信息 → 仍要运行」
+3. 它会起服务并打开浏览器（`http://127.0.0.1:8877`），第一次会让你设面板密码
+4. 拿授权码粘到面板「节点 → 换凭据」里
 
-开机自启（在 exe 所在目录执行）：
+包里还带了几个小工具（都是双击即用）：
 
-```bat
-urnetd.exe install      写注册表 Run 项并立即启动
-urnetd.exe uninstall    移除
-```
+| 文件 | 作用 |
+| --- | --- |
+| `1-start.bat` | 启动服务并打开面板，先帮你检查两个 exe 在不在 |
+| `2-fix-path.bat` | 两个 exe 放散了？双击它自动找回 `socksproxy.exe` 并放到一起 |
+| `3-install-autostart.bat` | 写注册表 Run 项，登录后自动启动 |
+| `4-uninstall-autostart.bat` | 移除自启 |
+| `5-diagnose.bat` | 出问题时双击：打印目录、端口占用和启动日志 |
+
+命令行等价写法：`urnetd.exe install` / `urnetd.exe uninstall`。
+`urnetd` 会按「同目录 → app 包 Resources → PATH」的顺序找 `socksproxy.exe`，
+也可以用 `URNET_BIN` 指定绝对路径。
 
 Windows 上没有 Shadowrocket，用 Clash Verge / FlClash，面板里点对应按钮就能导入。
 

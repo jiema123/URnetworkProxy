@@ -66,8 +66,18 @@ func socksProxyName() string {
 	return "socksproxy"
 }
 
+// 找 socksproxy 时探过的路径，报错时打印出来，省得用户猜
+var binSearchPaths []string
+
+func binSearchHint() string {
+	if len(binSearchPaths) == 0 {
+		return ""
+	}
+	return "（找过这些位置）:\n  " + strings.Join(binSearchPaths, "\n  ")
+}
+
 // 按「和 urnetd 同目录」→「app 包里的 Contents/Resources」→ PATH 的顺序找。
-// 不能写死开发机路径，否则换个机器/换个用户名就找不到。
+// 不写死绝对路径，否则换机器/换用户名就找不到。
 func defaultBinPath() string {
 	name := socksProxyName()
 	var cands []string
@@ -82,12 +92,14 @@ func defaultBinPath() string {
 			filepath.Join(dir, "..", "Resources", "bin", name),
 		)
 	}
+	binSearchPaths = append(binSearchPaths, cands...)
 	for _, p := range cands {
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
 			return p
 		}
 	}
 	if p, err := exec.LookPath(name); err == nil {
+		binSearchPaths = append(binSearchPaths, "PATH: "+p)
 		return p
 	}
 	if len(cands) > 0 {
@@ -509,7 +521,7 @@ func (s *Server) killExternal() {
 
 func (s *Server) startLocked(country string) error {
 	if _, err := os.Stat(binPath); err != nil {
-		return fmt.Errorf("找不到 socksproxy: %s", binPath)
+		return fmt.Errorf("找不到 socksproxy: %s%s\n把 socksproxy 放到 urnetd 旁边（同一目录），或用 URNET_BIN 指定", binPath, binSearchHint())
 	}
 	if _, err := os.Stat(authState); err != nil {
 		return fmt.Errorf("找不到 auth_state: %s\n%s", authState, authStateHint())
