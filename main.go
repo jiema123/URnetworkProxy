@@ -59,11 +59,13 @@ func envInt(k string, def int) int {
 }
 
 // socksproxy 的文件名（Windows 带 .exe，不然 exec 找不到）
-func socksProxyName() string {
+// Windows 上优先找 socksproxy.exe；也认没后缀的 socksproxy
+// （旧版兜底路径本身就没写 .exe，用户手动拷过去常常没后缀）
+func socksProxyNames() []string {
 	if platformName() == "windows" {
-		return "socksproxy.exe"
+		return []string{"socksproxy.exe", "socksproxy"}
 	}
-	return "socksproxy"
+	return []string{"socksproxy"}
 }
 
 // 找 socksproxy 时探过的路径，报错时打印出来，省得用户猜
@@ -76,42 +78,51 @@ func binSearchHint() string {
 	return "（找过这些位置）:\n  " + strings.Join(binSearchPaths, "\n  ")
 }
 
-// 按「和 urnetd 同目录」→「app 包里的 Contents/Resources」→ PATH 的顺序找。
+// 按「和 urnetd 同目录」→「app 包里的 Contents/Resources」→ PATH → 老版本固定目录 依次找。
 // 不写死绝对路径，否则换机器/换用户名就找不到。
 func defaultBinPath() string {
-	name := socksProxyName()
-	var cands []string
+	names := socksProxyNames()
+	var dirs []string
 	if exe, err := os.Executable(); err == nil {
 		if abs, err := filepath.Abs(exe); err == nil {
 			exe = abs
 		}
 		dir := filepath.Dir(exe)
-		cands = append(cands,
-			filepath.Join(dir, name),
-			filepath.Join(dir, "..", "Resources", name), // macOS .app：Contents/MacOS → Contents/Resources
-			filepath.Join(dir, "..", "Resources", "bin", name),
+		dirs = append(dirs,
+			dir,
+			filepath.Join(dir, "..", "Resources"), // macOS .app：Contents/MacOS → Contents/Resources
+			filepath.Join(dir, "..", "Resources", "bin"),
 		)
 	}
 	// 老版本把 socksproxy 放在这个固定目录，作为最后兜底
-	cands = append(cands, filepath.Join(home(), "Dev", "personal", "tools", "bin", name))
+	dirs = append(dirs, filepath.Join(home(), "Dev", "personal", "tools", "bin"))
+
+	var cands []string
+	for _, d := range dirs {
+		for _, n := range names {
+			cands = append(cands, filepath.Join(d, n))
+		}
+	}
 	binSearchPaths = append(binSearchPaths, cands...)
 	for _, p := range cands {
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
 			return p
 		}
 	}
-	if p, err := exec.LookPath(name); err == nil {
-		binSearchPaths = append(binSearchPaths, "PATH: "+p)
-		return p
+	for _, n := range names {
+		if p, err := exec.LookPath(n); err == nil {
+			binSearchPaths = append(binSearchPaths, "PATH: "+p)
+			return p
+		}
 	}
 	if len(cands) > 0 {
 		return cands[0]
 	}
-	return name
+	return names[0]
 }
 
 // appVersion 打在 release notes 和 banner 里，方便确认对方跑的是哪个版本
-const appVersion = "1.1.3"
+const appVersion = "1.1.4"
 
 var (
 	binPath    = env("URNET_BIN", defaultBinPath())

@@ -98,9 +98,11 @@ if not exist "socksproxy.exe" (
 rem ---- 兼容老版本：老 exe 会去 %USERPROFILE%\Dev\personal\tools\bin 找 socksproxy ----
 set "LEGACY=%USERPROFILE%\Dev\personal\tools\bin"
 if not exist "%LEGACY%\" mkdir "%LEGACY%" >nul 2>&1
+rem 两个名字都放一份：带 .exe 给新版，不带的给旧版（旧版兜底路径没写后缀）
 copy /y "%~dp0socksproxy.exe" "%LEGACY%\socksproxy.exe" >nul 2>&1
+copy /y "%~dp0socksproxy.exe" "%LEGACY%\socksproxy" >nul 2>&1
 if exist "%LEGACY%\socksproxy.exe" (
-  echo [ok] 已同步一份到 %LEGACY%\socksproxy.exe（兼容旧版程序）
+  echo [ok] 已同步到 %LEGACY%\socksproxy.exe 和 socksproxy（不带后缀的那份给旧版用）
 ) else (
   echo [提示] 没法写入 %LEGACY%，如果用的是最新版就不影响。
 )
@@ -142,9 +144,10 @@ rem 兼容早期版本：老 exe 会去找 %USERPROFILE%\Dev\personal\tools\bin\
 if exist "%USERPROFILE%\Dev\personal\tools\bin\" (
   if exist "%~dp0socksproxy.exe" (
     copy /y "%~dp0socksproxy.exe" "%USERPROFILE%\Dev\personal\tools\bin\socksproxy.exe" >nul
+    copy /y "%~dp0socksproxy.exe" "%USERPROFILE%\Dev\personal\tools\bin\socksproxy" >nul
     echo.
-    echo 检测到你机器上有旧版目录，已把 socksproxy.exe 复制过去，
-    echo 这样旧版 urnetd.exe 也能用。
+    echo 检测到你机器上有旧版目录，已把 socksproxy.exe 复制过去
+    echo 并额外放了一份不带后缀的 socksproxy（旧版程序找的就是这个名字）。
   )
 )
 echo.
