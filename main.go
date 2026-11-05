@@ -1268,12 +1268,21 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 	host := nodeHostFrom(r.URL.Query().Get("host"))
 	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Disposition", `attachment; filename="urnetwork.yaml"`)
+	// 客户端多半拿文件名当订阅名，所以带上地区
+	s.mu.Lock()
+	country := s.country
+	s.mu.Unlock()
+	if country == "" {
+		country = "node"
+	}
+	fn := "URnetwork-" + strings.ReplaceAll(country, " ", "-") + ".yaml"
+	w.Header().Set("Content-Disposition", "attachment; filename=\""+fn+"\"")
 	w.Write([]byte(s.clashYAML(host)))
 }
 
-// 一键导入 Clash Verge：调它的 clash://install-config 深链，让它自己来拉订阅
-func (s *Server) handlePushClash(w http.ResponseWriter, r *http.Request) {
+// pushSub 把订阅地址用某个客户端的深链推过去。
+// Clash 系客户端都认 <scheme>://install-config?url=<订阅地址>，自己来拉配置。
+func (s *Server) pushSub(w http.ResponseWriter, r *http.Request, scheme, clientName string) {
 	if r.Method != "POST" {
 		w.WriteHeader(405)
 		return
@@ -1285,7 +1294,7 @@ func (s *Server) handlePushClash(w http.ResponseWriter, r *http.Request) {
 		port = "8877"
 	}
 	subURL := "http://127.0.0.1:" + port + "/sub/" + subToken() + ".yaml?host=" + url.QueryEscape(host)
-	link := "clash://install-config?url=" + url.QueryEscape(subURL)
+	link := scheme + "://install-config?url=" + url.QueryEscape(subURL)
 	s.mu.Lock()
 	country := s.country
 	s.mu.Unlock()
@@ -1297,8 +1306,18 @@ func (s *Server) handlePushClash(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error(), "subUrl": subURL})
 		return
 	}
-	s.note("[urnetd] 已把订阅推给 Clash Verge: " + host)
+	s.note("[urnetd] 已把订阅推给 " + clientName + ": " + host)
 	json.NewEncoder(w).Encode(map[string]any{"ok": true, "subUrl": subURL, "link": link})
+}
+
+// 一键导入 Clash Verge
+func (s *Server) handlePushClash(w http.ResponseWriter, r *http.Request) {
+	s.pushSub(w, r, "clash", "Clash Verge")
+}
+
+// 一键导入 FlClash（它同时注册了 clash / clashmeta / flclash，用 flclash 才不歧义）
+func (s *Server) handlePushFlClash(w http.ResponseWriter, r *http.Request) {
+	s.pushSub(w, r, "flclash", "FlClash")
 }
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
@@ -1568,6 +1587,7 @@ func serve() {
 	mux.HandleFunc("/api/qr", s.authWrap(s.handleQR))
 	mux.HandleFunc("/api/push", s.authWrap(s.handlePush))
 	mux.HandleFunc("/api/push-clash", s.authWrap(s.handlePushClash))
+	mux.HandleFunc("/api/push-flclash", s.authWrap(s.handlePushFlClash))
 	// 订阅地址用令牌鉴权，Clash 拉取时没有登录态
 	mux.HandleFunc("/sub/", s.handleSub)
 	mux.HandleFunc("/api/logs", s.authWrap(s.handleLogs))
@@ -1723,6 +1743,7 @@ details.howto img{display:block;width:100%;max-width:300px;border-radius:8px;bor
         <button id="copy">复制 URI</button>
         <button class="p" id="push">导入 Shadowrocket</button>
         <button id="pushclash">导入 Clash Verge</button>
+        <button id="pushflclash">导入 FlClash</button>
       </div>
       <div class="uri" id="uri">—</div>
       <img id="qr" alt="节点二维码">
@@ -1954,18 +1975,21 @@ async function loadToken(){
     else { $('tokeninfo').textContent='凭据有效期至 '+t.expiresAt+'（剩 '+t.daysLeft+' 天）· '+t.network+auto; $('tokeninfo').style.color=''; }
   }catch(e){}
 }
-$('pushclash').addEventListener('click',async function(){
-  var b=this, old='导入 Clash Verge';
-  if(!confirm('会把「URnetwork」这个订阅加进 Clash Verge，并切换为当前配置。\n原来的配置不会被删除，之后可以在 Clash 里切回去。继续？')) return;
-  b.disabled=true;
-  b.textContent='发送中…';
-  try{
-    var r=await post('/api/push-clash?host='+encodeURIComponent(HOST));
-    if(r.ok){ b.textContent='已发送，去弹窗确认'; $('err').textContent='订阅地址: '+r.subUrl; }
-    else { b.textContent='导入失败'; $('err').textContent=(r.error||'open 失败'); }
-  }catch(e){ b.textContent='导入失败'; $('err').textContent=String(e); }
-  setTimeout(function(){b.textContent=old;b.disabled=false},2500);
-});
+function bindPush(id, endpoint, label, confirmText){
+  $(id).addEventListener('click',async function(){
+    var b=this;
+    if(confirmText && !confirm(confirmText)) return;
+    b.disabled=true; b.textContent='发送中…';
+    try{
+      var r=await post(endpoint+'?host='+encodeURIComponent(HOST));
+      if(r.ok){ b.textContent='已发送，去弹窗确认'; $('err').textContent='订阅地址: '+r.subUrl; }
+      else { b.textContent='导入失败'; $('err').textContent=(r.error||'open 失败'); }
+    }catch(e){ b.textContent='导入失败'; $('err').textContent=String(e); }
+    setTimeout(function(){b.textContent=label;b.disabled=false},2500);
+  });
+}
+bindPush('pushclash','/api/push-clash','导入 Clash Verge','会把「URnetwork」订阅加进 Clash Verge 并切换为当前配置。\n原配置不会被删除，之后可以切回去。继续？');
+bindPush('pushflclash','/api/push-flclash','导入 FlClash','会把「URnetwork」订阅加进 FlClash 并切换为当前配置。\n原配置不会被删除，之后可以切回去。继续？');
 $('docode').addEventListener('click',async function(){
   var b=this, old='用授权码登录', c=$('authcode').value.trim();
   if(!c){ $('err').textContent='先粘贴授权码（1 分钟内有效）'; return; }

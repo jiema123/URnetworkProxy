@@ -46,7 +46,7 @@ URnetwork 是 P2P 网络：出口是你家宽带上的**真人设备**，地址�
 
 - **网页面板**：点地区即切换，失败自动回滚到上一个地区
 - **真实出口探测**：内置极简 SOCKS5 客户端（RFC1929），走代理查 `ipinfo.io`，显示出口 IP / 城市 / 耗时
-- **节点分发**：生成节点 URI 和二维码；macOS 上可以把节点一键推进 Shadowrocket，也可以推进 Clash Verge（走订阅地址）
+- **节点分发**：生成节点 URI 和二维码；macOS 上可以把节点一键推进 Shadowrocket，也可以推进 Clash Verge / FlClash（走订阅地址）
 - **授权码登录**：App 里点一下 Copy Auth Code，粘到面板就换到新凭据，不用找密码、不用拷文件
 - **面板密码**：加盐 SHA-256 ×10 万轮存储，会话用 HMAC 签名，改密码即让旧会话失效
 - **开机自启**：macOS 用 LaunchAgent，Linux 用 systemd user unit，一个命令装/卸
@@ -130,7 +130,7 @@ urnetd token                 # 看还剩几天
 左侧地区列表（带在线出口数，可搜索），右侧节点卡片：
 
 - 顶部状态条：当前地区、出口 IP、探测耗时、端口/PID、凭据剩余天数、已运行时长
-- 节点卡片：地址下拉、复制 URI、导入 Shadowrocket、导入 Clash Verge、二维码
+- 节点卡片：地址下拉、复制 URI、导入 Shadowrocket / Clash Verge / FlClash、二维码
 - 「换凭据」：授权码输入框 + 「怎么获取授权码？」折叠说明
 - 「更多设置」：对外地址、JWT 直填、账号密码登录、停止服务
 - 底部日志：桥接进程的实时输出
@@ -142,14 +142,16 @@ urnetd token                 # 看还剩几天
 分流规则在小火箭的「配置」里配 —— 哪些域名 / IP 走这个节点、哪些直连，都由它决定，
 本工具只负责把出口稳定地挂在一个本地 SOCKS5 端口上。
 
-### 用 Clash / mihomo（含 Clash Verge）
+### 用 Clash / mihomo（含 Clash Verge、FlClash）
 
-- **Clash Verge**：面板点「导入 Clash Verge」，会通过 `clash://install-config` 深链把一个订阅加进去并切换为当前配置。
-  原来那份配置不会被删，之后可以在 Clash Verge 里切回去。弹窗里点确认即可。
-- **其他客户端**（mihomo / sing-box / openclash 等）：把订阅地址填进去就行。地址在点「导入 Clash Verge」失败时会显示，
+- **Clash Verge / FlClash**：面板点「导入 Clash Verge」或「导入 FlClash」，会通过
+  `clash://install-config` / `flclash://install-config` 深链把一个订阅加进去并切换为当前配置。
+  原来那份配置不会被删，之后可以在客户端里切回去。弹窗里点确认即可。
+- **其他客户端**（mihomo / sing-box / openclash 等）：把订阅地址填进去就行。地址在点导入按钮失败时会显示，
   也可以自己拼：`http://127.0.0.1:8877/sub/<token>.yaml?host=<对外地址>`。
   token 由面板密码派生（改密码即失效），所以订阅地址不需要也不带登录态。
 - 订阅里只有一个 `socks5` 节点 + 一个 `select` 组，**不含规则**：分流仍然在客户端里配。
+- 订阅名来自响应头里的文件名，会是 `URnetwork-<地区>.yaml`。
 
 > 生成的配置故意不写 `mixed-port` 之类端口字段，避免和客户端自己的端口设置打架。
 > 已用 `verge-mihomo -t` 校验过可以正常加载。
@@ -182,6 +184,7 @@ urnetd token login <账号> <密码|->  用账号密码换凭据
 | GET | `/api/qr?host=` | 节点二维码 PNG |
 | POST | `/api/push?host=` | 把节点推给本机客户端（macOS，Shadowrocket） |
 | POST | `/api/push-clash?host=` | 把订阅推给 Clash Verge（macOS，走 `clash://` 深链） |
+| POST | `/api/push-flclash?host=` | 把订阅推给 FlClash（macOS，走 `flclash://` 深链） |
 | GET | `/sub/<token>.yaml?host=` | Clash 订阅（令牌鉴权，不需要登录态） |
 | GET | `/api/logs?tail=` | 最近日志 |
 | GET/POST | `/api/host` | 读写对外地址（`auto` = 自动查公网 IP） |
