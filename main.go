@@ -122,7 +122,7 @@ func defaultBinPath() string {
 }
 
 // appVersion 打在 release notes 和 banner 里，方便确认对方跑的是哪个版本
-const appVersion = "1.1.4"
+const appVersion = "1.1.5"
 
 var (
 	binPath    = env("URNET_BIN", defaultBinPath())
@@ -156,6 +156,15 @@ func (r *Ring) Add(s string) {
 // note 记录 urnetd 自己的操作：既进环形日志（页面上能看到），
 // 也打到 stdout（落进 /tmp/urnetd.log）。代理的输出量很大，
 // 400 行的环形缓冲很快就会被冲掉，单独留一份才查得到。
+// tailLog 取最近几条子进程输出，用在报错里
+func (s *Server) tailLog(n int) string {
+	lines := s.logs.Tail(n)
+	if len(lines) == 0 {
+		return ""
+	}
+	return "\nsocksproxy 最后的输出:\n  " + strings.Join(lines, "\n  ")
+}
+
 func (s *Server) note(msg string) {
 	s.logs.Add(msg)
 	fmt.Println(msg)
@@ -286,6 +295,38 @@ func saveConf(c savedConf) error {
 		return err
 	}
 	return os.Chmod(confFile, 0o600)
+}
+
+// 出口选择里「让网络挑最好的」用这个哨兵值存盘；展示时翻成中文
+const bestCountry = "__best__"
+const bestLabel = "最佳可用"
+
+func isBestPick(c string) bool { return c == bestCountry || c == bestLabel }
+
+func countryLabel(c string) string {
+	if isBestPick(c) {
+		return bestLabel
+	}
+	return c
+}
+
+// 老的 socksproxy 没有 --best-available，探测一次缓存结果
+var bestProbeDone, bestProbeOK bool
+
+func supportsBestAvailable() bool {
+	if bestProbeDone {
+		return bestProbeOK
+	}
+	bestProbeDone = true
+	if _, err := os.Stat(binPath); err != nil {
+		return false
+	}
+	out, _ := exec.Command(binPath, "--help").CombinedOutput()
+	if len(out) == 0 {
+		out, _ = exec.Command(binPath, "-h").CombinedOutput()
+	}
+	bestProbeOK = strings.Contains(string(out), "best-available")
+	return bestProbeOK
 }
 
 func loadCountry() string {
@@ -522,6 +563,8 @@ func (s *Server) pump(r io.Reader, readyCh chan struct{}) {
 	for sc.Scan() {
 		line := sc.Text()
 		s.logs.Add(line)
+		// 同时打到 urnetd 自己的 stdout：app / 重定向日志里也能查
+		fmt.Println("[socksproxy] " + line)
 		if strings.Contains(line, "socks5 server is listening") {
 			once.Do(func() { close(readyCh) })
 		}
@@ -552,10 +595,17 @@ func (s *Server) startLocked(country string) error {
 
 	args := []string{
 		"--auth-state", authState,
-		"--country", country,
 		"--addr", fmt.Sprintf("0.0.0.0:%d", proxyPort),
 		"--socks-user", socksUser,
 		"--socks-password", socksPassword(),
+	}
+	if isBestPick(country) {
+		if !supportsBestAvailable() {
+			return fmt.Errorf("当前 socksproxy 不支持 --best-available，请换成 1.1.5 及以后的打包版本")
+		}
+		args = append(args, "--best-available")
+	} else {
+		args = append(args, "--country", country)
 	}
 	pr, pw, err := os.Pipe()
 	if err != nil {
@@ -581,7 +631,7 @@ func (s *Server) startLocked(country string) error {
 		stopProc(cmd, true)
 		cmd.Wait()
 		pr.Close()
-		return errors.New("启动超时（50s），看日志面板")
+		return errors.New("启动超时（50s），看日志面板" + s.tailLog(8))
 	}
 
 	done := make(chan struct{})
@@ -815,25 +865,27 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	primary, addrs := lanAddrs()
 	s.mu.Lock()
 	state := map[string]any{
-		"country":    s.country,
-		"running":    s.running,
-		"ready":      s.ready,
-		"busy":       s.busy,
-		"pid":        s.pid,
-		"port":       proxyPort,
-		"exitIp":     s.exitIP,
-		"exitCity":   s.exitCity,
-		"exitCC":     s.exitCC,
-		"latencyMs":  s.latency,
-		"lastErr":    s.lastErr,
-		"probeErr":   s.probeErr,
-		"primary":    primary,
-		"addrs":      addrs,
-		"jwtDays":    jwtDaysLeft(),
-		"canPush":    supportsAppImport(),
-		"platform":   platformName(),
-		"publicHost": loadConf().PublicHost,
-		"nodeHost":   nodeHostFrom(""),
+		"country":       countryLabel(s.country),
+		"best":          isBestPick(s.country),
+		"bestSupported": supportsBestAvailable(),
+		"running":       s.running,
+		"ready":         s.ready,
+		"busy":          s.busy,
+		"pid":           s.pid,
+		"port":          proxyPort,
+		"exitIp":        s.exitIP,
+		"exitCity":      s.exitCity,
+		"exitCC":        s.exitCC,
+		"latencyMs":     s.latency,
+		"lastErr":       s.lastErr,
+		"probeErr":      s.probeErr,
+		"primary":       primary,
+		"addrs":         addrs,
+		"jwtDays":       jwtDaysLeft(),
+		"canPush":       supportsAppImport(),
+		"platform":      platformName(),
+		"publicHost":    loadConf().PublicHost,
+		"nodeHost":      nodeHostFrom(""),
 	}
 	if !s.started.IsZero() {
 		state["uptimeSec"] = int(time.Since(s.started).Seconds())
@@ -1922,7 +1974,7 @@ details.howto img{display:block;width:100%;max-width:290px;border-radius:10px;
         <div class="card">
           <div class="hd"><span>快速切换出口</span><div class="right"><span class="muted" id="seg-now">—</span></div></div>
           <div class="row" id="quick"></div>
-          <div class="muted" style="margin-top:12px">点一下即切换出口，失败会自动回滚到原来的地区；完整列表在「地区」页。</div>
+          <div class="muted" style="margin-top:12px">点一下即切换出口，「最佳可用」交给网络自己挑当前最好用的节点；失败会自动回滚。完整列表在「地区」页。</div>
         </div>
         <div class="card">
           <div class="hd"><span>本地入口</span></div>
@@ -2063,9 +2115,12 @@ var QUICK=['Japan','United States','Singapore','Germany'];
 function paintQuick(){
   if(!S) return;
   var html='', i, c;
+  if(S.bestSupported!==false){
+    html+='<button class="btn '+(S.best?'p':'')+'" data-c="__best__" title="让网络自己挑当前最好用的出口">🏆 最佳可用</button>';
+  }
   for(i=0;i<QUICK.length;i++){
     c=QUICK[i];
-    html+='<button class="btn '+(c===S.country?'p':'')+'" data-c="'+esc(c)+'">'+esc(c)+'</button>';
+    html+='<button class="btn '+((!S.best&&c===S.country)?'p':'')+'" data-c="'+esc(c)+'">'+esc(c)+'</button>';
   }
   setHTML('quick', html);
   setText('seg-now', S.country?('当前 '+S.country):'—');
@@ -2139,10 +2194,14 @@ function paintRegions(){
   var q=($('q')&&$('q').value||'').toLowerCase();
   var cur=S?S.country:'';
   var html='';
+  if(S && S.bestSupported!==false && !q){
+    html+='<div class="ritem'+(S.best?' on':'')+'" data-n="__best__"><i></i><span>🏆 最佳可用</span><b>自动挑</b></div>';
+  }
   for(var i=0;i<REG.length;i++){
     var r=REG[i];
     if(q && r.name.toLowerCase().indexOf(q)<0) continue;
-    html+='<div class="ritem'+(r.name===cur?' on':'')+'" data-n="'+esc(r.name)+'"><i></i><span>'+esc(r.name)+'</span><b>'+r.count+'</b></div>';
+    var on=(!S || !S.best) && r.name===cur;
+    html+='<div class="ritem'+(on?' on':'')+'" data-n="'+esc(r.name)+'"><i></i><span>'+esc(r.name)+'</span><b>'+r.count+'</b></div>';
   }
   box.innerHTML=html||'<div class="muted" style="padding:10px">没有匹配的地区</div>';
 }
