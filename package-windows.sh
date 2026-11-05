@@ -85,10 +85,30 @@ if not exist "urnetd.exe" (
   pause & exit /b 1
 )
 if not exist "socksproxy.exe" (
-  echo [错误] 当前目录没有 socksproxy.exe。
-  echo        请先双击 2-fix-path.bat，或把 socksproxy.exe 拖到本文件夹。
+  echo [提示] 当前目录没有 socksproxy.exe，先帮你找一下...
+  for /r "%~dp0" %%f in (socksproxy.exe) do (
+    if not exist "%~dp0socksproxy.exe" copy /y "%%f" "%~dp0socksproxy.exe" >nul
+  )
+)
+if not exist "socksproxy.exe" (
+  echo [错误] 还是没找到 socksproxy.exe，请重新解压完整的 zip 包。
   pause & exit /b 1
 )
+
+rem ---- 兼容老版本：老 exe 会去 %USERPROFILE%\Dev\personal\tools\bin 找 socksproxy ----
+set "LEGACY=%USERPROFILE%\Dev\personal\tools\bin"
+if not exist "%LEGACY%\" mkdir "%LEGACY%" >nul 2>&1
+copy /y "%~dp0socksproxy.exe" "%LEGACY%\socksproxy.exe" >nul 2>&1
+if exist "%LEGACY%\socksproxy.exe" (
+  echo [ok] 已同步一份到 %LEGACY%\socksproxy.exe（兼容旧版程序）
+) else (
+  echo [提示] 没法写入 %LEGACY%，如果用的是最新版就不影响。
+)
+
+echo.
+echo 启动版本：
+urnetd.exe version
+echo.
 start "" http://127.0.0.1:8877
 echo 服务启动中，面板会自动打开；关掉这个窗口就等于停止服务。
 urnetd.exe
@@ -162,6 +182,9 @@ cat >"$DIST/stage/5-diagnose.bat" <<'BAT'
 chcp 65001 >nul
 title URnetwork — 诊断
 cd /d "%~dp0"
+echo ===== 版本 =====
+urnetd.exe version
+echo.
 echo ===== 文件夹内容 =====
 dir /b
 echo.

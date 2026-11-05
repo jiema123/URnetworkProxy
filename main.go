@@ -92,6 +92,8 @@ func defaultBinPath() string {
 			filepath.Join(dir, "..", "Resources", "bin", name),
 		)
 	}
+	// 老版本把 socksproxy 放在这个固定目录，作为最后兜底
+	cands = append(cands, filepath.Join(home(), "Dev", "personal", "tools", "bin", name))
 	binSearchPaths = append(binSearchPaths, cands...)
 	for _, p := range cands {
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
@@ -107,6 +109,9 @@ func defaultBinPath() string {
 	}
 	return name
 }
+
+// appVersion 打在 release notes 和 banner 里，方便确认对方跑的是哪个版本
+const appVersion = "1.1.3"
 
 var (
 	binPath    = env("URNET_BIN", defaultBinPath())
@@ -1396,6 +1401,20 @@ func main() {
 		doInstall()
 	case "uninstall":
 		doUninstall()
+	case "version", "-v", "--version":
+		fmt.Println("urnetd", appVersion, "("+platformName()+")")
+		fmt.Println("  可执行文件:", selfPath())
+		fmt.Println("  socksproxy:", binPath)
+		if len(binSearchPaths) > 1 {
+			fmt.Println("  查找顺序:")
+			for _, p := range binSearchPaths {
+				mark := " "
+				if p == binPath {
+					mark = "✓"
+				}
+				fmt.Println("   ", mark, p)
+			}
+		}
 	case "token":
 		doToken(os.Args[2:])
 	case "set-password":
@@ -1485,7 +1504,7 @@ func serve() {
 	if err := os.MkdirAll(filepath.Dir(confFile), 0o755); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
-	fmt.Printf("urnetd 监听 http://%s\n", listenAddr)
+	fmt.Printf("urnetd %s 监听 http://%s\n", appVersion, listenAddr)
 	fmt.Printf("  socksproxy: %s\n", binPath)
 	fmt.Printf("  auth_state: %s\n", authState)
 	fmt.Printf("  代理端口:   %d\n", proxyPort)
