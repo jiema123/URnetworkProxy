@@ -275,6 +275,19 @@ func randomPassword(n int) string {
 	return string(out)
 }
 
+// subToken 给订阅地址用的固定令牌：由面板密码派生，改密码即失效。
+// 这样 Clash 来拉 YAML 时不用带登录 cookie。
+func subToken() string {
+	c := loadConf()
+	m := hmac.New(sha256.New, sessionKey(c))
+	m.Write([]byte("urnetd-clash-sub-v1"))
+	return hex.EncodeToString(m.Sum(nil))[:32]
+}
+
+func checkSubToken(t string) bool {
+	return subtle.ConstantTimeCompare([]byte(t), []byte(subToken())) == 1
+}
+
 // ---------- 首次使用：由用户自己设置面板密码 ----------
 
 func (s *Server) handleSetupPage(w http.ResponseWriter, r *http.Request) {

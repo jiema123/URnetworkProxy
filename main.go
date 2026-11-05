@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -199,14 +200,17 @@ func socksPassword() string {
 }
 
 func loadConf() savedConf {
-	// 老版本把配置写在开发目录，发现旧文件就搬过来（密码等设置不丢）
-	if _, err := os.Stat(confFile); os.IsNotExist(err) {
-		if legacy := legacyConfPath(); legacy != "" {
-			if b, err := os.ReadFile(legacy); err == nil {
-				var c savedConf
-				if json.Unmarshal(b, &c) == nil {
-					saveConf(c)
-					return c
+	// 老版本把配置写在开发目录，发现旧文件就搬过来（密码等设置不丢）。
+	// 只在用默认路径时迁移，避免把旧配置误灌进用户自己指定的 URNETD_CONF。
+	if confFile == defaultConfPath() {
+		if _, err := os.Stat(confFile); os.IsNotExist(err) {
+			if legacy := legacyConfPath(); legacy != "" {
+				if b, err := os.ReadFile(legacy); err == nil {
+					var c savedConf
+					if json.Unmarshal(b, &c) == nil {
+						saveConf(c)
+						return c
+					}
 				}
 			}
 		}
@@ -1214,6 +1218,89 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
+// ---------- Clash / mihomo 订阅 ----------
+
+func yamlQuote(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
+}
+
+// clashYAML 生成只含一个节点的最小可用配置。
+// 故意不写 mixed-port 等端口字段：Clash Verge 会用自己设置里的端口覆盖，
+// 写死反而容易和用户已有配置打架。
+func (s *Server) clashYAML(host string) string {
+	s.mu.Lock()
+	country := s.country
+	s.mu.Unlock()
+	if country == "" {
+		country = loadCountry()
+	}
+	name := "URnetwork-" + country
+	var b strings.Builder
+	b.WriteString("# 由 urnetd 生成 —— 只是一个本地 SOCKS5 节点，分流规则请在客户端里配\n")
+	b.WriteString("proxies:\n")
+	b.WriteString("  - name: " + yamlQuote(name) + "\n")
+	b.WriteString("    type: socks5\n")
+	b.WriteString("    server: " + yamlQuote(host) + "\n")
+	b.WriteString("    port: " + strconv.Itoa(proxyPort) + "\n")
+	b.WriteString("    username: " + yamlQuote(socksUser) + "\n")
+	b.WriteString("    password: " + yamlQuote(socksPassword()) + "\n")
+	b.WriteString("    udp: true\n")
+	b.WriteString("proxy-groups:\n")
+	b.WriteString("  - name: \"URnetwork\"\n")
+	b.WriteString("    type: select\n")
+	b.WriteString("    proxies:\n")
+	b.WriteString("      - " + yamlQuote(name) + "\n")
+	b.WriteString("rules:\n")
+	b.WriteString("  - MATCH,URnetwork\n")
+	return b.String()
+}
+
+// handleSub 订阅地址：/sub/<token>.yaml，用令牌代替登录态
+func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
+	tok := strings.TrimPrefix(r.URL.Path, "/sub/")
+	tok = strings.TrimSuffix(tok, ".yaml")
+	if !checkSubToken(tok) {
+		http.Error(w, "token 不对", http.StatusForbidden)
+		return
+	}
+	host := nodeHostFrom(r.URL.Query().Get("host"))
+	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Disposition", `attachment; filename="urnetwork.yaml"`)
+	w.Write([]byte(s.clashYAML(host)))
+}
+
+// 一键导入 Clash Verge：调它的 clash://install-config 深链，让它自己来拉订阅
+func (s *Server) handlePushClash(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		w.WriteHeader(405)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	host := nodeHostFrom(r.URL.Query().Get("host"))
+	_, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		port = "8877"
+	}
+	subURL := "http://127.0.0.1:" + port + "/sub/" + subToken() + ".yaml?host=" + url.QueryEscape(host)
+	link := "clash://install-config?url=" + url.QueryEscape(subURL)
+	s.mu.Lock()
+	country := s.country
+	s.mu.Unlock()
+	if country != "" {
+		link += "&name=" + url.QueryEscape("URnetwork-"+country)
+	}
+	if err := openURL(link); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error(), "subUrl": subURL})
+		return
+	}
+	s.note("[urnetd] 已把订阅推给 Clash Verge: " + host)
+	json.NewEncoder(w).Encode(map[string]any{"ok": true, "subUrl": subURL, "link": link})
+}
+
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	n := 200
 	if v := r.URL.Query().Get("tail"); v != "" {
@@ -1480,6 +1567,9 @@ func serve() {
 	mux.HandleFunc("/api/node", s.authWrap(s.handleNode))
 	mux.HandleFunc("/api/qr", s.authWrap(s.handleQR))
 	mux.HandleFunc("/api/push", s.authWrap(s.handlePush))
+	mux.HandleFunc("/api/push-clash", s.authWrap(s.handlePushClash))
+	// 订阅地址用令牌鉴权，Clash 拉取时没有登录态
+	mux.HandleFunc("/sub/", s.handleSub)
 	mux.HandleFunc("/api/logs", s.authWrap(s.handleLogs))
 	mux.HandleFunc("/api/shutdown", s.authWrap(s.handleShutdown))
 	mux.HandleFunc("/api/host", s.authWrap(s.handlePublicHost))
@@ -1628,8 +1718,11 @@ details.howto img{display:block;width:100%;max-width:300px;border-radius:8px;bor
       <h2>节点</h2>
       <div class="tools">
         <select id="host" style="flex:1"></select>
+      </div>
+      <div class="tools">
         <button id="copy">复制 URI</button>
         <button class="p" id="push">导入 Shadowrocket</button>
+        <button id="pushclash">导入 Clash Verge</button>
       </div>
       <div class="uri" id="uri">—</div>
       <img id="qr" alt="节点二维码">
@@ -1861,6 +1954,18 @@ async function loadToken(){
     else { $('tokeninfo').textContent='凭据有效期至 '+t.expiresAt+'（剩 '+t.daysLeft+' 天）· '+t.network+auto; $('tokeninfo').style.color=''; }
   }catch(e){}
 }
+$('pushclash').addEventListener('click',async function(){
+  var b=this, old='导入 Clash Verge';
+  if(!confirm('会把「URnetwork」这个订阅加进 Clash Verge，并切换为当前配置。\n原来的配置不会被删除，之后可以在 Clash 里切回去。继续？')) return;
+  b.disabled=true;
+  b.textContent='发送中…';
+  try{
+    var r=await post('/api/push-clash?host='+encodeURIComponent(HOST));
+    if(r.ok){ b.textContent='已发送，去弹窗确认'; $('err').textContent='订阅地址: '+r.subUrl; }
+    else { b.textContent='导入失败'; $('err').textContent=(r.error||'open 失败'); }
+  }catch(e){ b.textContent='导入失败'; $('err').textContent=String(e); }
+  setTimeout(function(){b.textContent=old;b.disabled=false},2500);
+});
 $('docode').addEventListener('click',async function(){
   var b=this, old='用授权码登录', c=$('authcode').value.trim();
   if(!c){ $('err').textContent='先粘贴授权码（1 分钟内有效）'; return; }
