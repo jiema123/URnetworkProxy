@@ -17,7 +17,7 @@ urnetd.json
 .auth_state
 
 # 个人截图（含内网 IP、账号名）
-panel-*.png
+/panel-*.png
 /illustrations/
 
 # 系统垃圾
