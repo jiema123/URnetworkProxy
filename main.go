@@ -30,7 +30,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/skip2/go-qrcode"
@@ -478,17 +477,10 @@ func (s *Server) pump(r io.Reader, readyCh chan struct{}) {
 }
 
 func (s *Server) killExternal() {
-	// 端口被脚本或旧进程占着时，按可执行文件路径杀掉
-	out, err := exec.Command("pgrep", "-f", binPath).Output()
-	if err != nil {
-		return
+	// 端口被脚本或旧进程占着时清掉它（平台各自实现）
+	if killSquatters(binPath) {
+		time.Sleep(600 * time.Millisecond)
 	}
-	for _, f := range strings.Fields(string(out)) {
-		if pid, err := strconv.Atoi(f); err == nil {
-			syscall.Kill(pid, syscall.SIGTERM)
-		}
-	}
-	time.Sleep(600 * time.Millisecond)
 }
 
 func (s *Server) startLocked(country string) error {
@@ -520,7 +512,7 @@ func (s *Server) startLocked(country string) error {
 	cmd := exec.Command(binPath, args...)
 	cmd.Stdout = pw
 	cmd.Stderr = pw
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcAttr(cmd)
 	if err := cmd.Start(); err != nil {
 		pw.Close()
 		pr.Close()
@@ -534,7 +526,7 @@ func (s *Server) startLocked(country string) error {
 	select {
 	case <-readyCh:
 	case <-time.After(50 * time.Second):
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		stopProc(cmd, true)
 		cmd.Wait()
 		pr.Close()
 		return errors.New("启动超时（50s），看日志面板")
@@ -629,12 +621,12 @@ func (s *Server) stopLocked() {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
-	syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+	stopProc(cmd, false)
 	if done != nil {
 		select {
 		case <-done:
 		case <-time.After(6 * time.Second):
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			stopProc(cmd, true)
 			<-done
 		}
 	}
@@ -1239,6 +1231,11 @@ func (s *Server) clashYAML(host string) string {
 	name := "URnetwork-" + country
 	var b strings.Builder
 	b.WriteString("# 由 urnetd 生成 —— 只是一个本地 SOCKS5 节点，分流规则请在客户端里配\n")
+	b.WriteString("dns:\n")
+	b.WriteString("  # 客户端若开了 dns.respect-rules，缺这一项会被 mihomo 判为无效配置\n")
+	b.WriteString("  proxy-server-nameserver:\n")
+	b.WriteString("    - 223.5.5.5\n")
+	b.WriteString("    - 1.1.1.1\n")
 	b.WriteString("proxies:\n")
 	b.WriteString("  - name: " + yamlQuote(name) + "\n")
 	b.WriteString("    type: socks5\n")
@@ -1405,6 +1402,9 @@ func main() {
 
 //go:embed help/authcode.png
 var authCodeHelpEmbedded []byte
+
+//go:embed help/volt.gif
+var voltGIF []byte
 
 // helpImage 优先读磁盘上的同目录文件，方便替换示意图而不用重新编译；
 // 读不到就退回编译进二进制的那份。
@@ -1602,6 +1602,12 @@ func serve() {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Write(helpImage())
 	}))
+	// 悬浮球用的动图
+	mux.HandleFunc("/help/volt.gif", s.authWrap(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/gif")
+		w.Header().Set("Cache-Control", "public, max-age=86400")
+		w.Write(voltGIF)
+	}))
 	mux.HandleFunc("/", s.authWrap(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		// 页面内嵌在二进制里，别让浏览器缓存旧版本
@@ -1625,263 +1631,454 @@ const page = `<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>URnetwork 控制台</title>
 <style>
-:root{color-scheme:dark}
+:root{
+  --bg:#141518; --side:#0e0f12; --card:#202227; --card2:#282b31; --line:rgba(255,255,255,.07);
+  --text:#e9eaec; --muted:#8b8e95; --dim:#5f636b;
+  --accent:#3b82f6; --ok:#34c759; --warn:#f5a524; --danger:#ef4444;
+}
 *{box-sizing:border-box}
-body{margin:0;background:#1b1b1a;color:#e8e6e0;font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC",Helvetica,sans-serif}
-header{display:flex;align-items:center;gap:10px;padding:12px 20px;border-bottom:1px solid #33322f;position:sticky;top:0;background:#1b1b1a;z-index:5}
-h1{font-size:15px;font-weight:500;margin:0}
-#dot{width:8px;height:8px;border-radius:50%;background:#5f5e5a}
-#dot.on{background:#97c459}
-#dot.busy{background:#ef9f27}
-#dot.err{background:#f09595}
-#stext{font-size:13px;color:#a8a69e}
-main{padding:14px 20px 24px;max-width:1180px;margin:0 auto}
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:10px;margin-bottom:14px}
-.stat{background:#232322;border:1px solid #33322f;border-radius:10px;padding:9px 12px}
-.stat .k{font-size:11px;color:#8b8980}
-.stat .v{font-size:15px;font-weight:500;margin-top:2px;word-break:break-all}
-.cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);gap:14px}
-@media(max-width:820px){.cols{grid-template-columns:1fr}}
-.card{background:#232322;border:1px solid #33322f;border-radius:12px;padding:12px 14px}
-.card h2{font-size:13px;font-weight:500;margin:0 0 10px;color:#a8a69e}
-input,select,button{font:inherit;color:inherit;background:#2c2c2a;border:1px solid #3d3c39;border-radius:8px;padding:6px 10px;outline:none}
-button{cursor:pointer}
-button:hover{border-color:#5f5e5a}
-button.p{background:#185fa5;border-color:#185fa5;color:#fff}
-button.d{background:#4a1b0c;border-color:#993c1d;color:#f5c4b3}
-.tools{display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center}
-#regions{list-style:none;margin:0;padding:0;max-height:430px;overflow:auto}
-#regions li{display:flex;justify-content:space-between;gap:10px;padding:6px 10px;border-radius:8px;cursor:pointer;font-size:13px}
-#regions li:hover{background:#2c2c2a}
-#regions li.cur{background:#0c447c;color:#b5d4f4}
-#regions li b{font-weight:400;color:#8b8980;font-size:12px}
-#regions li.cur b{color:#85b7eb}
-.uri{font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;background:#1b1b1a;border:1px solid #33322f;border-radius:8px;padding:8px;word-break:break-all;margin-bottom:8px}
-pre{margin:0;background:#1b1b1a;border:1px solid #33322f;border-radius:8px;padding:9px;font-size:11px;line-height:1.45;max-height:200px;overflow:auto;white-space:pre-wrap;word-break:break-all;color:#a8a69e}
-#qr{display:block;width:176px;height:176px;background:#fff;border-radius:8px;padding:6px;margin:4px auto 10px}
-.err{color:#f09595;font-size:12px;min-height:16px}
-.refchip{font-family:ui-monospace,Menlo,monospace;font-size:12px;color:#97c459;background:#173404;border:1px solid #3b6d11;border-radius:6px;padding:3px 9px;cursor:pointer;white-space:nowrap}
-.refchip:hover{border-color:#639922}
-.guide{background:#232322;border:1px solid #33322f;border-radius:12px;padding:12px 14px;margin-bottom:14px;display:flex;gap:14px;align-items:flex-start}
-.guide .steps{display:grid;gap:9px;flex:1}
-.guide .st{display:flex;gap:9px;font-size:13px;line-height:1.5;align-items:baseline}
-.guide .n{width:18px;height:18px;flex:0 0 18px;border-radius:50%;background:#0c447c;color:#b5d4f4;font-size:11px;display:inline-flex;align-items:center;justify-content:center;position:relative;top:2px}
-.guide a{color:#85b7eb;text-decoration:none;border-bottom:1px solid #185fa5}
-.guide a:hover{color:#b5d4f4;border-color:#85b7eb}
-.guide .muted{color:#8b8980;font-size:12px}
-.guide code{font-family:ui-monospace,Menlo,monospace;background:#1b1b1a;border:1px solid #3d3c39;border-radius:6px;padding:1px 7px;color:#97c459;letter-spacing:1px}
-.guide .x{background:none;border:none;color:#8b8980;cursor:pointer;font-size:12px;padding:2px 6px;white-space:nowrap}
-.guide .x:hover{color:#e8e6e0;border:none}
-details.adv{margin-top:14px;border-top:1px solid #33322f;padding-top:10px}
-details.adv summary{cursor:pointer;list-style:none;font-size:12px;color:#a8a69e;display:flex;align-items:center;gap:6px;padding:4px 0}
-details.adv summary:hover{color:#e8e6e0}
-details.adv summary::-webkit-details-marker{display:none}
-details.adv summary::before{content:"▸";font-size:10px;color:#5f5e5a}
-details.adv[open] summary::before{content:"▾"}
-details.adv[open] summary{color:#a8a69e;margin-bottom:12px}
-details.adv .advbody{display:grid;gap:12px}
-details.adv .field label{display:block;font-size:11px;color:#8b8980;margin-bottom:5px}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:14px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC",Helvetica,sans-serif;
+  -webkit-font-smoothing:antialiased}
+.app{display:flex;min-height:100vh}
+.side{width:210px;flex:0 0 210px;background:var(--side);border-right:1px solid var(--line);
+  display:flex;flex-direction:column;padding:16px 12px;position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:9px;padding:2px 6px 18px}
+.brand img{width:32px;height:32px;object-fit:contain}
+.brand b{font-size:14px;font-weight:600}
+.brand span{color:var(--dim);font-size:11px}
+.nav{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:10px;cursor:pointer;
+  color:var(--muted);font-size:13.5px;user-select:none;margin-bottom:2px}
+.nav:hover{background:rgba(255,255,255,.04);color:var(--text)}
+.nav.on{background:var(--card2);color:var(--text);font-weight:500}
+.nav svg{width:17px;height:17px;flex:0 0 17px}
+.sidefoot{margin-top:auto;display:grid;gap:8px}
+.refchip{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;color:#9ac0fb;
+  background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.3);border-radius:8px;
+  padding:6px 8px;cursor:pointer;text-align:center}
+.refchip:hover{background:rgba(59,130,246,.2)}
+main{flex:1;min-width:0;padding:18px 22px 96px}
+.top{display:flex;align-items:center;gap:12px;margin-bottom:16px}
+.top h1{font-size:17px;font-weight:600;margin:0}
+.status{display:inline-flex;align-items:center;gap:7px;margin-left:auto;font-size:12.5px;
+  color:var(--muted);background:var(--card);border:1px solid var(--line);border-radius:999px;padding:5px 12px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--dim);display:inline-block}
+.dot.on{background:var(--ok);box-shadow:0 0 0 3px rgba(52,199,89,.15)}
+.dot.busy{background:var(--warn);box-shadow:0 0 0 3px rgba(245,165,36,.15)}
+.dot.err{background:var(--danger);box-shadow:0 0 0 3px rgba(239,68,68,.15)}
+.view{display:none}
+.view.on{display:block}
+</style>
+<style>
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px}
+.grid{display:grid;gap:14px;margin-bottom:14px}
+.g3{grid-template-columns:1.7fr 1fr 1fr}
+.g2{grid-template-columns:1.2fr 1fr}
+@media(max-width:980px){.g3,.g2{grid-template-columns:1fr}}
+.hd{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);margin-bottom:12px}
+.hd .right{margin-left:auto;display:flex;gap:8px;align-items:center}
+.big{font-size:26px;font-weight:600;letter-spacing:-.4px;line-height:1.25}
+.sub{color:var(--muted);font-size:12px;margin-top:3px}
+.chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;padding:2px 9px;border-radius:999px;
+  background:rgba(255,255,255,.06);color:var(--muted)}
+.chip.ok{background:rgba(52,199,89,.14);color:#7ee2a0}
+.chip.warn{background:rgba(245,165,36,.14);color:#f7c46b}
+.chip.bad{background:rgba(239,68,68,.14);color:#ff8f8f}
+.kv{display:flex;justify-content:space-between;gap:12px;font-size:12.5px;padding:5px 0;color:var(--muted)}
+.kv b{color:var(--text);font-weight:500;max-width:64%;text-align:right;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.bar{height:6px;border-radius:99px;background:rgba(255,255,255,.08);overflow:hidden;margin-top:12px}
+.bar i{display:block;height:100%;width:0;border-radius:99px;
+  background:linear-gradient(90deg,#3b82f6,#60a5fa);transition:width .4s}
+.orb{width:72px;height:72px;border-radius:50%;border:1px solid rgba(255,255,255,.12);
+  background:rgba(255,255,255,.05);display:grid;place-items:center;cursor:pointer;
+  transition:.18s;flex:0 0 72px}
+.orb:hover{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.2)}
+.orb svg{width:26px;height:26px;fill:#e9eaec}
+.orb.on{border-color:rgba(59,130,246,.5);background:rgba(59,130,246,.14)}
+.orb.on svg{fill:#9ac0fb}
+.btn{background:var(--card2);border:1px solid var(--line);color:var(--text);border-radius:10px;
+  padding:8px 12px;font-size:12.5px;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:rgba(255,255,255,.18);background:#2f3238}
+.btn.p{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.p:hover{background:#4b8ef7}
+.btn.d{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.3);color:#ff9d9d}
+.btn:disabled{opacity:.55;cursor:default}
+input,select{font:inherit;font-size:13px;color:var(--text);background:#1a1c20;
+  border:1px solid var(--line);border-radius:10px;padding:9px 11px;outline:none;min-width:0}
+input:focus,select:focus{border-color:rgba(59,130,246,.55)}
+input::placeholder{color:var(--dim)}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.row>input,.row>select{flex:1}
+.rlist{display:grid;grid-template-columns:1fr 1fr;gap:4px;max-height:62vh;overflow:auto}
+@media(max-width:980px){.rlist{grid-template-columns:1fr}}
+.ritem{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:10px;
+  cursor:pointer;font-size:13px}
+.ritem:hover{background:rgba(255,255,255,.05)}
+.ritem.on{background:rgba(59,130,246,.16);color:#bcd7ff}
+.ritem i{width:6px;height:6px;border-radius:50%;background:var(--dim);flex:0 0 6px}
+.ritem.on i{background:var(--accent)}
+.ritem span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ritem b{font-weight:400;color:var(--dim);font-size:11.5px}
+.ritem.on b{color:#8fb9f7}
+.uri{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;background:#1a1c20;
+  border:1px solid var(--line);border-radius:10px;padding:10px 12px;word-break:break-all;color:#c9ccd2}
+#qr{display:block;width:166px;height:166px;background:#fff;border-radius:12px;padding:6px;margin:4px auto 8px}
+pre{margin:0;background:#16181c;border:1px solid var(--line);border-radius:12px;padding:10px;
+  font-size:11.5px;line-height:1.5;max-height:250px;overflow:auto;white-space:pre-wrap;
+  word-break:break-all;color:#9aa0a9}
+.err{color:#ff9d9d;font-size:12px;min-height:16px;margin-top:8px}
+.muted{color:var(--muted);font-size:12px}
+.field label{display:block;font-size:11.5px;color:var(--muted);margin-bottom:6px}
 .cols2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.cols2 input{min-width:0}
-.chk{display:flex;align-items:center;gap:6px;font-size:12px;color:#8b8980;cursor:pointer}
-.chk input{width:auto;padding:0;margin:0}
-@media(max-width:520px){.cols2{grid-template-columns:1fr}}
-details.howto{margin-top:8px}
-details.howto summary{cursor:pointer;list-style:none;font-size:12px;color:#85b7eb;display:inline-flex;align-items:center}
-details.howto summary:hover{color:#b5d4f4}
+@media(max-width:560px){.cols2{grid-template-columns:1fr}}
+.chk{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);cursor:pointer}
+.chk input{width:auto;padding:0;margin:0;accent-color:var(--accent)}
+details.adv{margin-top:14px;border-top:1px solid var(--line);padding-top:12px}
+details.adv summary{cursor:pointer;list-style:none;font-size:12.5px;color:var(--muted);
+  display:flex;align-items:center;gap:7px}
+details.adv summary::-webkit-details-marker{display:none}
+details.adv summary::before{content:"\203A";font-size:15px;color:var(--dim);transition:.15s}
+details.adv[open] summary::before{transform:rotate(90deg)}
+details.adv summary:hover{color:var(--text)}
+details.adv .advbody{display:grid;gap:14px;margin-top:14px}
+details.howto{margin-top:10px}
+details.howto summary{cursor:pointer;list-style:none;font-size:12px;color:#7fb0f7;
+  display:inline-flex;align-items:center;gap:6px}
 details.howto summary::-webkit-details-marker{display:none}
-details.howto summary::before{content:"?";display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border:1px solid #185fa5;border-radius:50%;font-size:10px;margin-right:5px;color:#85b7eb}
-details.howto ol{margin:8px 0 6px;padding-left:20px;font-size:12px;color:#a8a69e;line-height:1.75}
-details.howto ol b{color:#e8e6e0;font-weight:500}
-details.howto a{color:#85b7eb}
-details.howto img{display:block;width:100%;max-width:300px;border-radius:8px;border:1px solid #33322f;margin-top:4px}
+details.howto summary::before{content:"?";display:inline-grid;place-items:center;width:15px;height:15px;
+  border:1px solid rgba(59,130,246,.5);border-radius:50%;font-size:10px}
+details.howto ol{margin:10px 0 8px;padding-left:20px;font-size:12px;color:var(--muted);line-height:1.8}
+details.howto ol b{color:var(--text);font-weight:500}
+details.howto a{color:#7fb0f7}
+details.howto img{display:block;width:100%;max-width:290px;border-radius:10px;
+  border:1px solid var(--line);margin-top:6px}
+.guide{display:flex;gap:14px;align-items:flex-start}
+.guide .steps{display:grid;gap:9px;flex:1}
+.guide .st{display:flex;gap:9px;font-size:13px;line-height:1.55;align-items:baseline}
+.guide .n{width:19px;height:19px;flex:0 0 19px;border-radius:50%;background:rgba(59,130,246,.18);
+  color:#9ac0fb;font-size:11px;display:inline-grid;place-items:center;position:relative;top:2px}
+.guide a{color:#7fb0f7;text-decoration:none}
+.guide a:hover{text-decoration:underline}
+.guide code{font-family:ui-monospace,Menlo,monospace;background:rgba(59,130,246,.14);
+  border-radius:5px;padding:1px 6px;color:#9ac0fb}
+.guide .x{background:none;border:none;color:var(--dim);cursor:pointer;font-size:12px;padding:2px 4px}
+.guide .x:hover{color:var(--text)}
+.ball{position:fixed;right:24px;bottom:24px;width:78px;height:78px;border-radius:50%;cursor:grab;
+  z-index:60;touch-action:none;user-select:none;filter:drop-shadow(0 10px 24px rgba(0,0,0,.55));
+  transition:transform .16s}
+.ball:active{cursor:grabbing}
+.ball img{width:100%;height:100%;object-fit:contain;pointer-events:none}
+.ball:hover{transform:scale(1.05)}
+.ballmenu{position:fixed;right:26px;bottom:114px;width:236px;background:rgba(32,34,39,.98);
+  border:1px solid var(--line);border-radius:14px;padding:12px;z-index:61;
+  box-shadow:0 18px 40px rgba(0,0,0,.55);display:none}
+.ballmenu.on{display:block}
+.ballmenu .t{font-size:12px;color:var(--muted)}
+.ballmenu .row{margin-top:8px}
 </style>
 </head>
 <body>
-<header>
-  <h1>URnetwork 控制台</h1>
-  <span id="dot"></span><span id="stext">连接中…</span>
-  <span style="flex:1"></span>
-  <span class="refchip" id="refchip" title="点击复制推荐码">推荐码 5CAI7C</span>
-  <button id="guide-tog" style="display:none">使用引导</button>
-  <button id="logout" title="退出登录">退出</button>
-</header>
-<main>
-  <div class="guide" id="guide">
-    <div class="steps">
-      <div class="st"><span class="n">1</span><span>打开 <a href="https://ur.io/" target="_blank" rel="noopener">ur.io</a> 登录（用 Google 账号），点右上角头像 → ACCOUNT TOOLS → <b>Copy Auth Code</b>；还没账号先注册，推荐码 <code>5CAI7C</code>（双方有奖励）</span></div>
-      <div class="st"><span class="n">2</span><span>把授权码粘到下面的「换凭据」里，60 秒内点「用授权码登录」<span class="muted">（码只能用一次）</span></span></div>
-      <div class="st"><span class="n">3</span><span>装 <a href="https://apps.apple.com/us/app/shadowrocket/id932747118" target="_blank" rel="noopener">Shadowrocket</a> <span class="muted">（付费，需美区账号）</span>，扫右侧二维码导入节点，分流规则在小火箭里配</span></div>
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <img src="/help/volt.gif" alt="">
+      <div><b>URnetwork</b><br><span>控制台</span></div>
     </div>
-    <button class="x" id="guide-x">收起</button>
-  </div>
-  <div class="stats">
-    <div class="stat"><div class="k">当前地区</div><div class="v" id="s-country">—</div></div>
-    <div class="stat"><div class="k">出口 IP</div><div class="v" id="s-exit">—</div></div>
-    <div class="stat"><div class="k">延迟</div><div class="v" id="s-lat">—</div></div>
-    <div class="stat"><div class="k">端口 / PID</div><div class="v" id="s-pid">—</div></div>
-    <div class="stat"><div class="k">凭据剩余</div><div class="v" id="s-jwt">—</div></div>
-    <div class="stat"><div class="k">已运行</div><div class="v" id="s-up">—</div></div>
-  </div>
-  <div class="cols">
-    <div class="card">
-      <h2>地区（点一下即切换）</h2>
-      <div class="tools">
-        <input id="q" placeholder="搜索地区" style="flex:1;min-width:110px">
-        <button id="refresh">刷新</button>
-        <button class="d" id="stop">停止</button>
-        <button class="p" id="start">启动</button>
-      </div>
-      <ul id="regions"></ul>
+    <div class="nav on" data-view="dash">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="7" height="7" rx="1.6"/><rect x="14" y="3" width="7" height="7" rx="1.6"/><rect x="3" y="14" width="7" height="7" rx="1.6"/><rect x="14" y="14" width="7" height="7" rx="1.6"/></svg>
+      仪表盘
     </div>
-    <div class="card">
-      <h2>节点</h2>
-      <div class="tools">
-        <select id="host" style="flex:1"></select>
-      </div>
-      <div class="tools">
-        <button id="copy">复制 URI</button>
-        <button class="p" id="push">导入 Shadowrocket</button>
-        <button id="pushclash">导入 Clash Verge</button>
-        <button id="pushflclash">导入 FlClash</button>
-      </div>
-      <div class="uri" id="uri">—</div>
-      <img id="qr" alt="节点二维码">
-      <div class="muted" style="text-align:center;margin-top:-4px">手机：用 Shadowrocket 扫这张图</div>
-      <div class="err" id="err"></div>
-      <div class="field" style="margin-top:12px">
-        <label>换凭据：粘贴授权码（App → Account Tools → Copy Auth Code，1 分钟有效）</label>
-        <div class="tools" style="margin:0">
-          <input id="authcode" placeholder="粘贴一次性授权码，越快越好" style="flex:1">
-          <button class="p" id="docode">用授权码登录</button>
+    <div class="nav" data-view="regions">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 2.5 15.4 0 18M12 3c-2.5 2.6-2.5 15.4 0 18"/></svg>
+      地区
+    </div>
+    <div class="nav" data-view="node">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="4" width="6" height="6" rx="1.4"/><rect x="14" y="14" width="6" height="6" rx="1.4"/><path d="M10 7h4a3 3 0 0 1 3 3v4"/></svg>
+      节点
+    </div>
+    <div class="nav" data-view="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M20 12h1M3 12h1M12 3v1M12 20v1M17.7 6.3l.7-.7M5.6 18.4l.7-.7M17.7 17.7l.7.7M5.6 5.6l.7.7"/></svg>
+      设置
+    </div>
+    <div class="sidefoot">
+      <div class="refchip" id="refchip" title="点击复制推荐码">推荐码 5CAI7C</div>
+      <button class="btn" id="logout">退出登录</button>
+    </div>
+  </aside>
+
+  <main>
+    <div class="top">
+      <h1 id="page-title">仪表盘</h1>
+      <span class="status"><i class="dot" id="dot"></i><span id="stext">连接中…</span></span>
+    </div>
+    <section class="view on" id="view-dash">
+      <div class="card guide" id="guide" style="margin-bottom:14px">
+        <div class="steps">
+          <div class="st"><span class="n">1</span><span>打开 <a href="https://ur.io/" target="_blank" rel="noopener">ur.io</a> 登录（用 Google 账号），点右上角头像 → ACCOUNT TOOLS → <b>Copy Auth Code</b>；还没账号先注册，推荐码 <code>5CAI7C</code>（双方有奖励）</span></div>
+          <div class="st"><span class="n">2</span><span>把授权码粘到「节点」页的「换凭据」里，60 秒内点「用授权码登录」<span class="muted">（码只能用一次）</span></span></div>
+          <div class="st"><span class="n">3</span><span>装 <a href="https://apps.apple.com/us/app/shadowrocket/id932747118" target="_blank" rel="noopener">Shadowrocket</a> <span class="muted">（付费，需美区账号）</span>，扫节点二维码导入，分流规则在客户端里配</span></div>
         </div>
-        <details class="howto">
-          <summary>怎么获取授权码？</summary>
-          <ol>
-            <li>浏览器打开 <a href="https://ur.io/" target="_blank" rel="noopener">ur.io</a> 并登录（用你注册时的 Google 账号即可）。</li>
-            <li>点右上角头像（显示你的账户名），展开账户面板。</li>
-            <li>往下拉到 <b>ACCOUNT TOOLS</b>，点 <b>Copy Auth Code</b>。</li>
-            <li>回到这里粘贴，60 秒内点「用授权码登录」。码只能用一次，过期就再复制一个。</li>
-          </ol>
-          <img src="/help/authcode.png" alt="ACCOUNT TOOLS 里 Copy Auth Code 按钮的位置">
-        </details>
+        <button class="x" id="guide-x">收起</button>
       </div>
-      <details class="adv" id="adv">
-        <summary><span id="advsum">更多设置</span></summary>
-        <div class="advbody">
-          <div class="field">
-            <label>对外地址（手机/远端要用哪个地址）</label>
-            <div class="tools" style="margin:0">
-              <input id="pubhost" placeholder="IP / 域名 / auto" style="flex:1">
-              <button id="savehost">保存</button>
+
+      <div class="grid g3">
+        <div class="card">
+          <div class="hd"><span>状态</span><span class="chip" id="c-status">未运行</span></div>
+          <div style="display:flex;align-items:center;gap:18px">
+            <div style="min-width:0;flex:1">
+              <div class="big" id="s-country">—</div>
+              <div class="sub" id="s-exit">出口 IP</div>
+              <div style="display:flex;gap:22px;margin-top:14px">
+                <div><div class="muted" style="font-size:11px">运行时长</div><div id="s-up" style="font-size:14px">—</div></div>
+                <div><div class="muted" style="font-size:11px">端口 / PID</div><div id="s-pid" style="font-size:14px">—</div></div>
+              </div>
             </div>
+            <div class="orb" id="orb" title="启动 / 停止"><svg viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="hd"><span>探测耗时</span></div>
+          <div class="big sm" id="s-lat">—</div>
+          <div class="sub">走代理请求 ipinfo，含建连</div>
+        </div>
+
+        <div class="card">
+          <div class="hd"><span>凭据</span><span class="chip" id="c-jwt">—</span></div>
+          <div class="big sm" id="s-jwt">—</div>
+          <div class="sub">到期后重新拿授权码</div>
+          <div class="bar"><i id="jwtbar"></i></div>
+        </div>
+      </div>
+
+      <div class="grid g2">
+        <div class="card">
+          <div class="hd"><span>快速切换出口</span><div class="right"><span class="muted" id="seg-now">—</span></div></div>
+          <div class="row" id="quick"></div>
+          <div class="muted" style="margin-top:12px">点一下即切换出口，失败会自动回滚到原来的地区；完整列表在「地区」页。</div>
+        </div>
+        <div class="card">
+          <div class="hd"><span>本地入口</span></div>
+          <div class="kv"><span>代理端口</span><b>socks5 · 9999</b></div>
+          <div class="kv"><span>面板地址</span><b id="s-panel">—</b></div>
+          <div class="row" style="margin-top:10px">
+            <button class="btn" id="copy2">复制节点地址</button>
+            <button class="btn" id="goto-node">去节点页</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hd"><span>实时日志</span><div class="right"><span class="muted">每 2.5 秒刷新</span></div></div>
+        <pre id="logs"></pre>
+      </div>
+    </section>
+    <section class="view" id="view-regions">
+      <div class="card">
+        <div class="hd"><span>出口地区</span><div class="right"><span class="muted" id="region-count"></span></div></div>
+        <div class="row" style="margin-bottom:12px">
+          <input id="q" placeholder="搜索地区，点一下即切换">
+          <button class="btn" id="refresh">刷新列表</button>
+          <button class="btn" id="start">启动</button>
+          <button class="btn d" id="stop">停止</button>
+        </div>
+        <div class="rlist" id="regions"></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-node">
+      <div class="grid g2">
+        <div class="card">
+          <div class="hd"><span>节点</span></div>
+          <div class="row" style="margin-bottom:10px">
+            <select id="host"></select>
+            <button class="btn" id="copy">复制 URI</button>
+          </div>
+          <div class="row" style="margin-bottom:10px">
+            <button class="btn p" id="push">导入 Shadowrocket</button>
+            <button class="btn" id="pushclash">导入 Clash Verge</button>
+            <button class="btn" id="pushflclash">导入 FlClash</button>
+          </div>
+          <div class="uri" id="uri">—</div>
+          <div class="err" id="err"></div>
+
+          <div class="field" style="margin-top:16px">
+            <label>换凭据：粘贴授权码（App → Account Tools → Copy Auth Code，1 分钟有效）</label>
+            <div class="row">
+              <input id="authcode" placeholder="粘贴一次性授权码，越快越好">
+              <button class="btn p" id="docode">用授权码登录</button>
+            </div>
+            <details class="howto">
+              <summary>怎么获取授权码？</summary>
+              <ol>
+                <li>浏览器打开 <a href="https://ur.io/" target="_blank" rel="noopener">ur.io</a> 并登录（Google 账号即可）。</li>
+                <li>点右上角头像（显示你的账户名），展开账户面板。</li>
+                <li>往下拉到 <b>ACCOUNT TOOLS</b>，点 <b>Copy Auth Code</b>。</li>
+                <li>回到这里粘贴，60 秒内点「用授权码登录」。码只能用一次，过期就再复制一个。</li>
+              </ol>
+              <img src="/help/authcode.png" alt="ACCOUNT TOOLS 里 Copy Auth Code 按钮的位置">
+            </details>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="hd"><span>扫码导入</span></div>
+          <img id="qr" alt="节点二维码">
+          <div class="muted" style="text-align:center">手机：用 Shadowrocket 扫这张图</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-settings">
+      <div class="card">
+        <div class="hd"><span>凭据与地址</span><div class="right"><span class="muted" id="tokeninfo"></span></div></div>
+        <div class="advbody" style="display:grid;gap:14px">
+          <div class="field">
+            <label>对外地址（手机 / 远端要用哪个地址）</label>
+            <div class="row"><input id="pubhost" placeholder="IP / 域名 / auto"><button class="btn" id="savehost">保存</button></div>
           </div>
           <div class="field">
             <label>凭据 JWT</label>
-            <div class="tools" style="margin:0">
-              <input id="token" placeholder="粘贴 JWT 或 .auth_state 内容" style="flex:1">
-              <button id="savetoken">更新</button>
-            </div>
+            <div class="row"><input id="token" placeholder="粘贴 JWT 或 .auth_state 内容"><button class="btn" id="savetoken">更新</button></div>
           </div>
           <div class="field">
             <label>或者用账号密码向官方接口换凭据</label>
-            <div class="cols2">
-              <input id="uauser" placeholder="账号（邮箱/用户 ID）">
-              <input id="uapass" type="password" placeholder="密码" autocomplete="off">
-            </div>
-            <div class="tools" style="margin:8px 0 0">
+            <div class="cols2"><input id="uauser" placeholder="账号（邮箱/用户 ID）"><input id="uapass" type="password" placeholder="密码" autocomplete="off"></div>
+            <div class="row" style="margin-top:8px">
               <label class="chk"><input type="checkbox" id="remember"><span>记住，快过期时自动续期</span></label>
-              <button id="dologin" style="margin-left:auto">账号登录</button>
+              <button class="btn" id="dologin" style="margin-left:auto">账号登录</button>
             </div>
           </div>
-          <div class="muted" id="tokeninfo"></div>
-          <div class="field" style="border-top:1px solid #33322f;padding-top:10px">
+          <div class="field" style="border-top:1px solid var(--line);padding-top:14px">
             <label>进程</label>
-            <div class="tools" style="margin:0">
-              <button class="d" id="shutdown">停止服务并退出</button>
-            </div>
-            <div class="muted" style="margin-top:6px">如果装了开机自启，停掉后会被自动拉起；要彻底停先执行 urnetd uninstall</div>
+            <div class="row"><button class="btn d" id="shutdown">停止服务并退出</button></div>
+            <div class="muted" style="margin-top:6px">装过开机自启的话停掉会被拉起；要彻底停先执行 urnetd uninstall</div>
           </div>
         </div>
-      </details>
-      <h2 style="margin-top:12px">日志</h2>
-      <pre id="logs"></pre>
-    </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="ball" id="ball"><img src="/help/volt.gif" alt="Volt"></div>
+<div class="ballmenu" id="ballmenu">
+  <div class="t">快捷操作</div>
+  <div class="row"><span class="chip" id="bm-status">—</span><span class="muted" id="bm-region">—</span></div>
+  <div class="row">
+    <button class="btn p" id="bm-toggle" style="flex:1">启动</button>
+    <button class="btn" id="bm-node" style="flex:1">节点</button>
   </div>
-</main>
+</div>
 <script>
 var S=null, HOST='', REG=[], lastNodeKey='';
 function $(id){return document.getElementById(id)}
+function setText(id,v){var e=$(id); if(e) e.textContent=v}
+function setHTML(id,v){var e=$(id); if(e) e.innerHTML=v}
 async function get(u){var r=await fetch(u); if(r.status===401){location.href='/login';throw new Error('401')} return r.json()}
 async function post(u,b){var r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}); if(r.status===401){location.href='/login';throw new Error('401')} return r.json()}
-function fmtUp(s){if(!s&&s!==0) return '—'; var h=Math.floor(s/3600),m=Math.floor(s%3600/60); return (h?h+'h ':'')+m+'m'}
+function fmtUp(s){if(s==null||s<0) return '—'; var h=Math.floor(s/3600),m=Math.floor(s%3600/60); return (h?h+'h ':'')+m+'m'}
+function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+var TITLES={dash:'仪表盘',regions:'地区',node:'节点',settings:'设置'};
+function showView(v){
+  var i, vs=document.querySelectorAll('.view');
+  for(i=0;i<vs.length;i++) vs[i].classList.remove('on');
+  var t=$('view-'+v); if(t) t.classList.add('on');
+  var ns=document.querySelectorAll('.nav');
+  for(i=0;i<ns.length;i++) ns[i].classList.toggle('on', ns[i].getAttribute('data-view')===v);
+  setText('page-title', TITLES[v]||'仪表盘');
+  try{ localStorage.setItem('urnetdView', v); }catch(e){}
+  if(v==='node'){ lastNodeKey=''; paintNode(); }
+  if(v==='dash'){ paintQuick(); }
+}
+
+var QUICK=['Japan','United States','Singapore','Germany'];
+function paintQuick(){
+  if(!S) return;
+  var html='', i, c;
+  for(i=0;i<QUICK.length;i++){
+    c=QUICK[i];
+    html+='<button class="btn '+(c===S.country?'p':'')+'" data-c="'+esc(c)+'">'+esc(c)+'</button>';
+  }
+  setHTML('quick', html);
+  setText('seg-now', S.country?('当前 '+S.country):'—');
+}
 
 function paint(){
   if(!S) return;
   var d=$('dot'), t=$('stext');
-  if(S.busy){d.className='busy';t.textContent='切换中…'}
-  else if(S.lastErr&&!S.running){d.className='err';t.textContent='异常'}
-  else if(S.running&&S.ready){d.className='on';t.textContent='运行中'}
-  else if(S.running){d.className='busy';t.textContent='启动中…'}
-  else {d.className='';t.textContent='已停止'}
-  $('s-country').textContent=S.country||'—';
-  $('s-exit').textContent=S.exitIp?(S.exitIp+(S.exitCity?' · '+S.exitCity:'')):'—';
-  $('s-lat').textContent=S.latencyMs?S.latencyMs+' ms':'—';
-  $('s-pid').textContent=S.port+' / '+(S.pid||'—');
-  $('s-jwt').textContent=S.jwtDays>=0?S.jwtDays+' 天':'未知';
-  $('s-jwt').style.color=(S.jwtDays>=0&&S.jwtDays<7)?'#f09595':'';
-  $('s-up').textContent=S.uptimeSec?fmtUp(S.uptimeSec):'—';
-  $('err').textContent=S.lastErr||'';
-  $('push').style.display=(S.canPush===false)?'none':'inline-block';
+  var online=S.running&&S.ready;
+  if(d){ d.className='dot'+(S.busy?' busy':(S.lastErr&&!S.running?' err':(online?' on':''))); }
+  setText('stext', S.busy?'切换中…':(S.lastErr&&!S.running?'异常':(online?'运行中':(S.running?'启动中…':'已停止'))));
+  var cs=$('c-status');
+  if(cs){ cs.className='chip '+(S.busy?'warn':(online?'ok':'bad')); cs.textContent=S.busy?'切换中':(online?'运行中':(S.running?'启动中':'未运行')); }
+  setText('s-country', S.country||'—');
+  setText('s-exit', S.exitIp?(S.exitIp+(S.exitCity?' · '+S.exitCity:'')):'还没有探测到出口');
+  setText('s-up', S.uptimeSec!=null?fmtUp(S.uptimeSec):'—');
+  setText('s-pid', (S.port||'—')+' / '+(S.pid||'—'));
+  setText('s-lat', S.latencyMs?S.latencyMs+' ms':'—');
+  setText('s-jwt', S.jwtDays>=0?S.jwtDays+' 天':'未知');
+  setText('s-panel', 'http://127.0.0.1:'+(location.port||'8877'));
+  var cj=$('c-jwt');
+  if(cj){ cj.className='chip '+(S.jwtDays<0?'':(S.jwtDays<7?'warn':'ok')); cj.textContent=S.jwtDays<0?'未知':(S.jwtDays<7?'即将过期':'有效'); }
+  var b=$('jwtbar'); if(b){ var p=Math.max(0,Math.min(100,Math.round((S.jwtDays/30)*100))); b.style.width=(S.jwtDays<0?0:p)+'%'; }
+  var orb=$('orb'); if(orb){ orb.classList.toggle('on', !!online); }
+  setText('err', S.lastErr||'');
+  var push=$('push'); if(push){ push.style.display=(S.canPush===false)?'none':'inline-block'; }
+  paintQuick();
   buildHosts(); paintRegions(); paintNode();
+  var bm=$('bm-status'); if(bm){ bm.className='chip '+(online?'ok':'bad'); bm.textContent=online?'运行中':'未运行'; }
+  setText('bm-region', S.country||'');
+  setText('bm-toggle', online?'停止':'启动');
+  setText('region-count', S.regionCount?('共 '+S.regionCount+' 个地区'):'');
 }
-
 function buildHosts(){
   if(!S.addrs) return;
-  var sel=$('host');
+  var sel=$('host'); if(!sel) return;
   var list=S.addrs.slice();
   if(S.nodeHost && list.indexOf(S.nodeHost)<0) list.unshift(S.nodeHost);
   if(!HOST) HOST=S.nodeHost||S.primary||list[0];
-  if(list.indexOf(HOST)<0){ list.unshift(HOST); }
+  if(list.indexOf(HOST)<0) list.unshift(HOST);
   var want=list.join(',');
   if(sel.getAttribute('data-list')!==want){
     sel.innerHTML='';
-    list.forEach(function(a){
-      var o=document.createElement('option');
+    for(var i=0;i<list.length;i++){
+      var a=list[i], o=document.createElement('option');
       o.value=a;
       o.textContent=a+(a===S.nodeHost?'（对外地址）':(a===S.primary?'（主网卡）':''));
       sel.appendChild(o);
-    });
+    }
     sel.setAttribute('data-list',want);
   }
   sel.value=HOST;
-  var ph=$('pubhost');
-  if(document.activeElement!==ph) ph.value=S.publicHost||'';
+  var ph=$('pubhost'); if(ph && document.activeElement!==ph) ph.value=S.publicHost||'';
 }
 
 async function paintNode(){
-  var key=(S?S.country:'')+'|'+HOST;
+  if(!S) return;
+  var key=(S.country||'')+'|'+HOST;
   if(key===lastNodeKey) return;
   lastNodeKey=key;
   try{
     var r=await get('/api/node?host='+encodeURIComponent(HOST));
-    $('uri').textContent=r.uri;
-    $('qr').src='/api/qr?host='+encodeURIComponent(HOST)+'&t='+Date.now();
-    $('qr').onerror=function(){this.style.display='none'};
-    $('qr').onload=function(){this.style.display='block'};
+    setText('uri', r.uri);
+    var q=$('qr');
+    if(q){ q.src='/api/qr?host='+encodeURIComponent(HOST)+'&t='+Date.now(); q.style.display='block'; }
   }catch(e){}
 }
 
 function paintRegions(){
-  var q=($('q').value||'').toLowerCase();
+  var box=$('regions'); if(!box) return;
+  var q=($('q')&&$('q').value||'').toLowerCase();
   var cur=S?S.country:'';
   var html='';
-  REG.forEach(function(r){
-    if(q&&r.name.toLowerCase().indexOf(q)<0) return;
-    var cls=(r.name===cur)?' class="cur"':'';
-    html+='<li'+cls+' data-n="'+r.name+'"><span>'+r.name+'</span><b>'+r.count+'</b></li>';
-  });
-  $('regions').innerHTML=html||'<li style="cursor:default;color:#8b8980">没有匹配的地区</li>';
+  for(var i=0;i<REG.length;i++){
+    var r=REG[i];
+    if(q && r.name.toLowerCase().indexOf(q)<0) continue;
+    html+='<div class="ritem'+(r.name===cur?' on':'')+'" data-n="'+esc(r.name)+'"><i></i><span>'+esc(r.name)+'</span><b>'+r.count+'</b></div>';
+  }
+  box.innerHTML=html||'<div class="muted" style="padding:10px">没有匹配的地区</div>';
 }
 
 async function loadRegions(force){
@@ -1890,166 +2087,218 @@ async function loadRegions(force){
 
 async function poll(){
   try{ S=await get('/api/state'); paint(); }
-  catch(e){ $('stext').textContent='后端无响应' }
+  catch(e){ setText('stext','后端无响应'); }
 }
 
 var lock=false;
 async function switchTo(name){
   if(lock) return;
   lock=true;
-  $('stext').textContent='切换到 '+name+'…';
+  setText('stext','切换到 '+name+'…');
   try{ await post('/api/switch',{country:name}); }catch(e){}
   setTimeout(function(){lock=false},2000);
 }
 
-$('regions').addEventListener('click',function(e){
-  var li=e.target.closest('li');
-  if(li&&li.getAttribute('data-n')) switchTo(li.getAttribute('data-n'));
-});
-$('q').addEventListener('input',paintRegions);
-$('refresh').addEventListener('click',function(){loadRegions(true)});
-$('host').addEventListener('change',function(){HOST=this.value;lastNodeKey='';paintNode()});
-$('copy').addEventListener('click',function(){
-  var t=$('uri').textContent, b=this;
-  if(navigator.clipboard) navigator.clipboard.writeText(t);
-  b.textContent='已复制';
-  setTimeout(function(){b.textContent='复制 URI'},1200);
-});
-$('push').addEventListener('click',async function(){
-  var b=this, old='导入 Shadowrocket';
-  b.disabled=true;
-  b.textContent='发送中…';
-  try{
-    var r=await fetch('/api/push?host='+encodeURIComponent(HOST),{method:'POST'});
-    var j=await r.json();
-    if(j.ok){ b.textContent='已发送，去弹窗确认'; $('err').textContent=''; }
-    else { b.textContent='导入失败'; $('err').textContent=(j.error||'open 失败'); }
-  }catch(e){ b.textContent='导入失败'; $('err').textContent=String(e); }
-  setTimeout(function(){b.textContent=old;b.disabled=false},2500);
-});
-$('stop').addEventListener('click',async function(){await fetch('/api/stop',{method:'POST'});poll()});
-$('start').addEventListener('click',async function(){await fetch('/api/start',{method:'POST'});poll()});
-$('logout').addEventListener('click',async function(){
-  try{ await fetch('/api/logout',{method:'POST'}); }catch(e){}
-  location.href='/login';
-});
-$('shutdown').addEventListener('click',async function(){
-  if(!confirm('停止代理并退出 urnetd？之后需要重新打开 app（或执行 urnetd）才会恢复。')) return;
-  try{ await fetch('/api/shutdown',{method:'POST'}); }catch(e){}
-  document.body.innerHTML='<div style="padding:60px 20px;text-align:center;color:#a8a69e;font-size:14px">服务已停止，可以关闭这个页面了。<br><span style="font-size:12px">重新打开控制台：双击 URnetwork Console.app</span></div>';
-});
-$('savehost').addEventListener('click',async function(){
-  var b=this, old='保存';
-  b.textContent='保存中…';
-  try{
-    var r=await post('/api/host',{host:$('pubhost').value.trim()});
-    if(r.error){ $('err').textContent=r.error; b.textContent='失败'; }
-    else { b.textContent='已保存'; HOST=''; lastNodeKey=''; poll(); }
-  }catch(e){ b.textContent='失败'; }
-  setTimeout(function(){b.textContent=old},1500);
-});
-$('savetoken').addEventListener('click',async function(){
-  var b=this, old='更新凭据', t=$('token').value.trim();
-  if(!t){ $('err').textContent='先粘贴 token'; return; }
-  b.textContent='校验中…';
-  try{
-    var r=await post('/api/token',{token:t});
-    if(r.error){ $('err').textContent=r.error; b.textContent='失败'; }
-    else {
-      b.textContent='已更新'; $('token').value='';
-      $('err').textContent='凭据已更新至 '+r.expiresAt+'（剩 '+r.daysLeft+' 天），代理正在重启…';
-      loadToken(); setTimeout(poll,1500);
-    }
-  }catch(e){ b.textContent='失败'; }
-  setTimeout(function(){b.textContent=old},1800);
-});
-async function loadToken(){
-  try{
-    var t=await get('/api/token');
-    if(t.userAuth){ $('uauser').value=t.userAuth; $('remember').checked=true; }
-    var auto=t.hasCred?'　· 已存账号，将自动续期':'';
-    if(t.daysLeft>=0&&t.valid!==false){ $('advsum').textContent='更多设置 · 凭据剩 '+t.daysLeft+' 天'; }
-    else { $('advsum').textContent='更多设置 · 凭据需要更新'; $('adv').open=true; }
-    if(t.valid===false&&t.error){ $('tokeninfo').textContent='凭据: 读不到 —— '+t.error; $('tokeninfo').style.color='#f09595'; }
-    else if(t.valid===false){ $('tokeninfo').textContent='凭据已过期（'+t.expiresAt+'），请更新'+auto; $('tokeninfo').style.color='#f09595'; }
-    else { $('tokeninfo').textContent='凭据有效期至 '+t.expiresAt+'（剩 '+t.daysLeft+' 天）· '+t.network+auto; $('tokeninfo').style.color=''; }
-  }catch(e){}
-}
-function bindPush(id, endpoint, label, confirmText){
-  $(id).addEventListener('click',async function(){
-    var b=this;
-    if(confirmText && !confirm(confirmText)) return;
-    b.disabled=true; b.textContent='发送中…';
-    try{
-      var r=await post(endpoint+'?host='+encodeURIComponent(HOST));
-      if(r.ok){ b.textContent='已发送，去弹窗确认'; $('err').textContent='订阅地址: '+r.subUrl; }
-      else { b.textContent='导入失败'; $('err').textContent=(r.error||'open 失败'); }
-    }catch(e){ b.textContent='导入失败'; $('err').textContent=String(e); }
-    setTimeout(function(){b.textContent=label;b.disabled=false},2500);
-  });
-}
-bindPush('pushclash','/api/push-clash','导入 Clash Verge','会把「URnetwork」订阅加进 Clash Verge 并切换为当前配置。\n原配置不会被删除，之后可以切回去。继续？');
-bindPush('pushflclash','/api/push-flclash','导入 FlClash','会把「URnetwork」订阅加进 FlClash 并切换为当前配置。\n原配置不会被删除，之后可以切回去。继续？');
-$('docode').addEventListener('click',async function(){
-  var b=this, old='用授权码登录', c=$('authcode').value.trim();
-  if(!c){ $('err').textContent='先粘贴授权码（1 分钟内有效）'; return; }
-  b.textContent='登录中…'; $('err').textContent='';
-  try{
-    var r=await post('/api/auth-code',{code:c});
-    if(r.error){ $('err').textContent='授权码登录失败: '+r.error; b.textContent='失败'; }
-    else {
-      b.textContent='已登录'; $('authcode').value='';
-      $('err').textContent='授权码登录成功，凭据至 '+r.expiresAt+'（剩 '+r.daysLeft+' 天），代理正在重启…';
-      loadToken(); setTimeout(poll,1500);
-    }
-  }catch(e){ b.textContent='失败'; }
-  setTimeout(function(){b.textContent=old},1800);
-});
-$('dologin').addEventListener('click',async function(){
-  var b=this, old='账号登录';
-  var ua=$('uauser').value.trim(), pw=$('uapass').value;
-  if(!ua||!pw){ $('err').textContent='账号和密码都要填'; return; }
-  b.textContent='登录中…'; $('err').textContent='';
-  try{
-    var r=await post('/api/login-cred',{userAuth:ua,password:pw,remember:$('remember').checked});
-    if(r.error){ $('err').textContent='登录失败: '+r.error; b.textContent='失败'; }
-    else {
-      b.textContent='已登录'; $('uapass').value='';
-      $('err').textContent='登录成功（'+r.network+'），凭据有效期至 '+r.expiresAt+'，代理正在重启…';
-      loadToken(); setTimeout(poll,1500);
-    }
-  }catch(e){ b.textContent='失败'; }
-  setTimeout(function(){b.textContent=old},1800);
-});
-
 async function logs(){
   try{
     var L=await get('/api/logs?tail=120');
-    var el=$('logs');
+    var el=$('logs'); if(!el) return;
     var bottom=(el.scrollTop+el.clientHeight>=el.scrollHeight-24);
     el.textContent=(L||[]).join('\n');
     if(bottom) el.scrollTop=el.scrollHeight;
   }catch(e){}
 }
 
-function syncGuide(){
-  var hid=(localStorage.getItem('urnetdGuide')==='0');
-  $('guide').style.display=hid?'none':'flex';
-  $('guide-tog').style.display=hid?'inline-block':'none';
+async function loadToken(){
+  try{
+    var t=await get('/api/token');
+    if(t.userAuth){ if($('uauser')) $('uauser').value=t.userAuth; if($('remember')) $('remember').checked=true; }
+    var auto=t.hasCred?'　· 已存账号，将自动续期':'';
+    var box=$('tokeninfo');
+    if(box){
+      if(t.error){ box.textContent='凭据: 读不到 —— '+t.error; box.style.color='#ff9d9d'; }
+      else if(t.valid===false){ box.textContent='凭据已过期（'+t.expiresAt+'），请更新'+auto; box.style.color='#ff9d9d'; }
+      else { box.textContent='有效期至 '+t.expiresAt+'（剩 '+t.daysLeft+' 天）· '+t.network+auto; box.style.color=''; }
+    }
+  }catch(e){}
 }
-$('guide-x').addEventListener('click',function(){localStorage.setItem('urnetdGuide','0');syncGuide()});
-$('guide-tog').addEventListener('click',function(){localStorage.setItem('urnetdGuide','1');syncGuide()});
-$('refchip').addEventListener('click',function(){
-  var b=this, old='推荐码 5CAI7C';
-  if(navigator.clipboard) navigator.clipboard.writeText('5CAI7C');
+function bindPush(id, endpoint, label, confirmText){
+  var b=$(id); if(!b) return;
+  b.addEventListener('click',async function(){
+    if(confirmText && !confirm(confirmText)) return;
+    b.disabled=true; b.textContent='发送中…';
+    try{
+      var r=await post(endpoint+'?host='+encodeURIComponent(HOST));
+      if(r.ok){ b.textContent='已发送，去弹窗确认'; setText('err','订阅地址: '+r.subUrl); }
+      else { b.textContent='导入失败'; setText('err', (r.error||'open 失败')); }
+    }catch(e){ b.textContent='导入失败'; }
+    setTimeout(function(){b.textContent=label;b.disabled=false},2500);
+  });
+}
+
+function on(id, ev, fn){ var e=$(id); if(e) e.addEventListener(ev, fn); }
+
+on('regions','click',function(e){
+  var n=e.target.closest('.ritem');
+  if(n && n.getAttribute('data-n')) switchTo(n.getAttribute('data-n'));
+});
+on('quick','click',function(e){
+  var b=e.target.closest('button');
+  if(b && b.getAttribute('data-c')) switchTo(b.getAttribute('data-c'));
+});
+on('q','input',paintRegions);
+on('refresh','click',function(){loadRegions(true)});
+on('host','change',function(){HOST=this.value;lastNodeKey='';paintNode()});
+on('copy','click',function(){ copyText($('uri').textContent, this, '复制 URI'); });
+on('copy2','click',function(){ copyText($('uri').textContent, this, '复制节点地址'); });
+function copyText(t, btn, label){
+  if(!t) return;
+  if(navigator.clipboard) navigator.clipboard.writeText(t);
+  btn.textContent='已复制';
+  setTimeout(function(){btn.textContent=label},1200);
+}
+on('goto-node','click',function(){ showView('node'); });
+on('orb','click',async function(){
+  if(!S) return;
+  if(S.running) await fetch('/api/stop',{method:'POST'});
+  else await fetch('/api/start',{method:'POST'});
+  poll();
+});
+on('stop','click',async function(){ await fetch('/api/stop',{method:'POST'}); poll(); });
+on('start','click',async function(){ await fetch('/api/start',{method:'POST'}); poll(); });
+on('logout','click',async function(){ try{ await fetch('/api/logout',{method:'POST'}); }catch(e){} location.href='/login'; });
+on('refchip','click',function(){
+  var b=this; if(navigator.clipboard) navigator.clipboard.writeText('5CAI7C');
   b.textContent='已复制 5CAI7C';
+  setTimeout(function(){b.textContent='推荐码 5CAI7C'},1400);
+});
+on('guide-x','click',function(){ $('guide').style.display='none'; try{localStorage.setItem('urnetdGuide','0')}catch(e){} });
+on('savehost','click',async function(){
+  var b=this, old='保存';
+  b.textContent='保存中…';
+  try{
+    var r=await post('/api/host',{host:$('pubhost').value.trim()});
+    if(r.error){ setText('err', r.error); b.textContent='失败'; }
+    else { b.textContent='已保存'; HOST=''; lastNodeKey=''; poll(); }
+  }catch(e){ b.textContent='失败'; }
   setTimeout(function(){b.textContent=old},1400);
 });
-syncGuide();
+on('savetoken','click',async function(){
+  var b=this, old='更新', t=$('token').value.trim();
+  if(!t){ setText('err','先粘贴 token'); return; }
+  b.textContent='校验中…';
+  try{
+    var r=await post('/api/token',{token:t});
+    if(r.error){ setText('err', r.error); b.textContent='失败'; }
+    else { b.textContent='已更新'; $('token').value=''; setText('tokeninfo','已更新至 '+r.expiresAt); loadToken(); setTimeout(poll,1500); }
+  }catch(e){ b.textContent='失败'; }
+  setTimeout(function(){b.textContent=old},1600);
+});
+on('docode','click',async function(){
+  var b=this, old='用授权码登录', c=$('authcode').value.trim();
+  if(!c){ setText('err','先粘贴授权码（1 分钟内有效）'); return; }
+  b.textContent='登录中…';
+  try{
+    var r=await post('/api/auth-code',{code:c});
+    if(r.error){ setText('err','授权码登录失败: '+r.error); b.textContent='失败'; }
+    else { b.textContent='已登录'; $('authcode').value=''; setText('err','登录成功，凭据至 '+r.expiresAt+'，代理重启中…'); loadToken(); setTimeout(poll,1500); }
+  }catch(e){ b.textContent='失败'; }
+  setTimeout(function(){b.textContent=old},1800);
+});
+on('dologin','click',async function(){
+  var b=this, old='账号登录';
+  var ua=$('uauser').value.trim(), pw=$('uapass').value;
+  if(!ua||!pw){ setText('err','账号和密码都要填'); return; }
+  b.textContent='登录中…'; setText('err','');
+  try{
+    var r=await post('/api/login-cred',{userAuth:ua,password:pw,remember:$('remember').checked});
+    if(r.error){ setText('err','登录失败: '+r.error); b.textContent='失败'; }
+    else { b.textContent='已登录'; $('uapass').value=''; setText('err','登录成功，凭据至 '+r.expiresAt); loadToken(); setTimeout(poll,1500); }
+  }catch(e){ b.textContent='失败'; }
+  setTimeout(function(){b.textContent=old},1800);
+});
+on('shutdown','click',async function(){
+  if(!confirm('停止代理并退出 urnetd？之后需要重新打开 app 才会恢复。')) return;
+  try{ await fetch('/api/shutdown',{method:'POST'}); }catch(e){}
+  document.body.innerHTML='<div style="padding:80px 20px;text-align:center;color:#8b8e95;font-size:14px">服务已停止，可以关闭这个页面了。<br><span style="font-size:12px">重新打开控制台：双击 URnetwork Console.app</span></div>';
+});
+bindPush('push','/api/push','导入 Shadowrocket','');
+bindPush('pushclash','/api/push-clash','导入 Clash Verge','会把「URnetwork」订阅加进 Clash Verge 并切换为当前配置。\n原配置不会被删除，之后可以切回去。继续？');
+bindPush('pushflclash','/api/push-flclash','导入 FlClash','会把「URnetwork」订阅加进 FlClash 并切换为当前配置。\n原配置不会被删除，之后可以切回去。继续？');
+
+var navs=document.querySelectorAll('.nav');
+for(var i=0;i<navs.length;i++){
+  navs[i].addEventListener('click',function(){ showView(this.getAttribute('data-view')); });
+}
+
+(function(){
+  var ball=$('ball'), menu=$('ballmenu');
+  if(!ball||!menu) return;
+  var pos=null;
+  try{ pos=JSON.parse(localStorage.getItem('urnetdBallPos')||'null'); }catch(e){}
+  if(pos && typeof pos.r==='number' && typeof pos.b==='number'){
+    ball.style.right=pos.r+'px'; ball.style.bottom=pos.b+'px';
+    menu.style.right=(pos.r+2)+'px'; menu.style.bottom=(pos.b+90)+'px';
+  }
+  var dragging=false, moved=false, sx=0, sy=0, sr=0, sb=0;
+  ball.addEventListener('pointerdown',function(e){
+    dragging=true; moved=false;
+    sx=e.clientX; sy=e.clientY;
+    sr=parseInt(getComputedStyle(ball).right,10)||24;
+    sb=parseInt(getComputedStyle(ball).bottom,10)||24;
+    ball.setPointerCapture(e.pointerId);
+  });
+  ball.addEventListener('pointermove',function(e){
+    if(!dragging) return;
+    var dx=sx-e.clientX, dy=sy-e.clientY;
+    if(Math.abs(dx)>6||Math.abs(dy)>6) moved=true;
+    if(!moved) return;
+    var r=Math.max(8,Math.min(window.innerWidth-90, sr+dx));
+    var b=Math.max(8,Math.min(window.innerHeight-90, sb+dy));
+    ball.style.right=r+'px'; ball.style.bottom=b+'px';
+    menu.style.right=(r+2)+'px'; menu.style.bottom=(b+90)+'px';
+  });
+  ball.addEventListener('pointerup',function(e){
+    if(!dragging) return;
+    dragging=false;
+    if(moved){
+      try{
+        localStorage.setItem('urnetdBallPos', JSON.stringify({
+          r:parseInt(ball.style.right,10), b:parseInt(ball.style.bottom,10)
+        }));
+      }catch(err){}
+      return;
+    }
+    menu.classList.toggle('on');
+  });
+  on('bm-toggle','click',async function(){
+    if(!S) return;
+    if(S.running) await fetch('/api/stop',{method:'POST'});
+    else await fetch('/api/start',{method:'POST'});
+    poll();
+  });
+  on('bm-node','click',function(){ showView('node'); menu.classList.remove('on'); });
+  document.addEventListener('click',function(e){
+    if(!menu.classList.contains('on')) return;
+    if(menu.contains(e.target)||ball.contains(e.target)) return;
+    menu.classList.remove('on');
+  });
+})();
+
+(function(){
+  var hideGuide=false;
+  try{ hideGuide=localStorage.getItem('urnetdGuide')==='0'; }catch(e){}
+  if(hideGuide && $('guide')) $('guide').style.display='none';
+  var v='dash';
+  try{ v=localStorage.getItem('urnetdView')||'dash'; }catch(e){}
+  if(!TITLES[v]) v='dash';
+  showView(v);
+})();
 
 poll(); loadRegions(false); logs(); loadToken();
 setInterval(poll,2000);
 setInterval(logs,2500);
 </script>
 </body>
-</html>`
+</html>
+`

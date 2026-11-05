@@ -15,6 +15,7 @@
 | macOS（Intel + Apple Silicon 通用） | `urnetd-x.y.z.dmg` |
 | Linux amd64 | `urnetd-linux-amd64.tar.gz` |
 | Linux arm64 | `urnetd-linux-arm64.tar.gz` |
+| Windows x64 | `urnetd-windows-amd64.zip` |
 
 ---
 
@@ -88,6 +89,22 @@ URNETD_LISTEN=0.0.0.0:8877 /opt/urnetd/urnetd
 sudo loginctl enable-linger $USER   # 没登录会话也让服务常驻
 ```
 
+### Windows（zip）
+
+1. 解压到任意目录（例如 `D:\urnetd`），双击 `urnetd.exe`
+   - 出现 SmartScreen 提示就点「更多信息 → 仍要运行」
+2. 它会起服务并打开浏览器（`http://127.0.0.1:8877`），第一次会让你设面板密码
+3. 拿授权码粘到面板「节点 → 换凭据」里
+
+开机自启（在 exe 所在目录执行）：
+
+```bat
+urnetd.exe install      写注册表 Run 项并立即启动
+urnetd.exe uninstall    移除
+```
+
+Windows 上没有 Shadowrocket，用 Clash Verge / FlClash，面板里点对应按钮就能导入。
+
 ### 从源码构建
 
 ```bash
@@ -95,11 +112,20 @@ go build -o urnetd .          # 需要 Go 1.27+
 ./urnetd
 ```
 
+三个平台都是纯 Go，交叉编译即可：
+
+```bash
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o urnetd.exe .
+CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build -o urnetd .
+```
+
 打包（产物在 `dist/`、`linux/`）：
 
 ```bash
-./package-macos.sh   # 出 .app + dmg，两个二进制都是 arm64+x86_64
-./package-linux.sh   # 出 amd64 / arm64 tar.gz
+./package-macos.sh     # 出 .app + dmg，两个二进制都是 arm64+x86_64
+./package-linux.sh     # 出 amd64 / arm64 tar.gz
+./package-windows.sh   # 出 windows-amd64 zip
+./release.sh 1.1.0     # 打包三平台 + 打 tag + 发 Release
 ```
 
 ## 第一次用：拿授权码
@@ -224,7 +250,8 @@ Linux `~/.config/urnetd/urnetd.json`（0600，含密码哈希）。
 - 凭据约 30 天过期。有账号密码可以自动续期，否则到期重新拿一次授权码
 - 同一账号并发多个桥接实例时，平台可能限流（429），建议只跑一个
 - 依赖官方未公开文档的接口，平台侧改动可能让某些功能失效
-- 目前只支持 macOS / Linux；Windows 没做（Go 侧代码基本通用，主要差自启和「一键导入」）
+- Windows 版没有「导入 Shadowrocket」（苹果独占），也没有按进程组优雅退出；
+  开机自启用的是注册表 Run 项，不是服务，注销后不运行
 
 ## 致谢
 

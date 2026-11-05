@@ -3,8 +3,10 @@ urnetd
 urnetd.exe
 *.dmg
 *.tar.gz
+*.zip
 /dist/
 /linux/
+/windows/
 icon.icns
 icon.iconset/
 

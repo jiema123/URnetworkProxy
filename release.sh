@@ -30,6 +30,7 @@ esac
 DMG="urnetd-$V.dmg"
 TAR1="linux/urnetd-linux-amd64.tar.gz"
 TAR2="linux/urnetd-linux-arm64.tar.gz"
+ZIP="windows/urnetd-windows-amd64.zip"
 
 echo "==> 版本 $V"
 if [ -n "$(git status --porcelain)" ]; then
@@ -41,15 +42,16 @@ fi
 echo "==> 打包"
 VERSION="$V" ./package-macos.sh | tail -2
 VERSION="$V" ./package-linux.sh | tail -2
+VERSION="$V" ./package-windows.sh | tail -2
 
-for f in "$DMG" "$TAR1" "$TAR2"; do
+for f in "$DMG" "$TAR1" "$TAR2" "$ZIP"; do
 	[ -f "$f" ] || { echo "缺少产物: $f"; exit 1; }
 done
 
 if [ -n "$DRY" ]; then
 	echo
 	echo "dry-run：产物已生成，未打 tag、未发版"
-	shasum -a 256 "$DMG" "$TAR1" "$TAR2"
+	shasum -a 256 "$DMG" "$TAR1" "$TAR2" "$ZIP"
 	exit 0
 fi
 
@@ -61,7 +63,7 @@ echo "==> 发版并上传"
 gh release create "v$V" \
 	--title "v$V" \
 	--generate-notes \
-	"$DMG" "$TAR1" "$TAR2"
+	"$DMG" "$TAR1" "$TAR2" "$ZIP"
 
 echo
 echo "完成: https://github.com/jiema123/URnetworkProxy/releases/tag/v$V"
