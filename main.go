@@ -58,18 +58,42 @@ func envInt(k string, def int) int {
 	return def
 }
 
-// 优先用 app 包里自带的 socksproxy（打包成 .app 时放在 Contents/Resources），
-// 找不到再退回开发机上的路径。
+// socksproxy 的文件名（Windows 带 .exe，不然 exec 找不到）
+func socksProxyName() string {
+	if platformName() == "windows" {
+		return "socksproxy.exe"
+	}
+	return "socksproxy"
+}
+
+// 按「和 urnetd 同目录」→「app 包里的 Contents/Resources」→ PATH 的顺序找。
+// 不能写死开发机路径，否则换个机器/换个用户名就找不到。
 func defaultBinPath() string {
+	name := socksProxyName()
+	var cands []string
 	if exe, err := os.Executable(); err == nil {
-		p := filepath.Join(filepath.Dir(exe), "..", "Resources", "socksproxy")
+		if abs, err := filepath.Abs(exe); err == nil {
+			exe = abs
+		}
+		dir := filepath.Dir(exe)
+		cands = append(cands,
+			filepath.Join(dir, name),
+			filepath.Join(dir, "..", "Resources", name), // macOS .app：Contents/MacOS → Contents/Resources
+			filepath.Join(dir, "..", "Resources", "bin", name),
+		)
+	}
+	for _, p := range cands {
 		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			if abs, err := filepath.Abs(p); err == nil {
-				return abs
-			}
+			return p
 		}
 	}
-	return filepath.Join(home(), "Dev/personal/tools/bin/socksproxy")
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+	if len(cands) > 0 {
+		return cands[0]
+	}
+	return name
 }
 
 var (
