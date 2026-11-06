@@ -1952,6 +1952,7 @@ details.howto img{display:block;width:100%;max-width:290px;border-radius:10px;
     </div>
     <div class="sidefoot">
       <div class="refchip" id="refchip" title="点击复制推荐码">推荐码 5CAI7C</div>
+      <div class="muted" id="ver" style="text-align:center;font-size:11px">—</div>
       <button class="btn" id="logout">退出登录</button>
     </div>
   </aside>
@@ -2081,6 +2082,10 @@ details.howto img{display:block;width:100%;max-width:290px;border-radius:10px;
 
     <section class="view" id="view-settings">
       <div class="card">
+        <div class="hd"><span>版本</span></div>
+        <div class="kv"><span>urnetd</span><b id="ver2">—</b></div>
+        <div class="kv"><span>平台</span><b id="plat">—</b></div>
+        <div style="height:18px"></div>
         <div class="hd"><span>凭据与地址</span><div class="right"><span class="muted" id="tokeninfo"></span></div></div>
         <div class="advbody" style="display:grid;gap:14px">
           <div class="field">
@@ -2191,6 +2196,9 @@ function paint(){
   setText('bm-toggle', online?'停止':'启动');
   setText('region-count', S.regionCount?('共 '+S.regionCount+' 个地区'):'');
   paintAuth();
+  setText('ver', S.version?('v'+S.version):'—');
+  setText('ver2', S.version?('v'+S.version):'—');
+  setText('plat', S.platform||'—');
 }
 function buildHosts(){
   if(!S.addrs) return;
