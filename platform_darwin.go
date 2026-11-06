@@ -5,6 +5,8 @@ package main
 // 平台相关实现（macOS）：launchd 自启、route 取默认网卡、open 打开链接。
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -18,7 +20,48 @@ import (
 func platformName() string { return "darwin" }
 
 // 凭据由 URnetwork.app 登录后写入自己的沙盒容器
+// 优先用「复制到我们自己目录」的那份：跨 App 容器读文件在 macOS 上
+// 可能被 TCC 拦住（读操作直接挂住），拷一份出来最省事。
+func containerAuthState() string {
+	return filepath.Join(home(), "Library/Containers/network.ur/Data/Documents/network_spaces/ur.network/main/.by/.auth_state")
+}
+
+// ensureAuthState 把 URnetwork App 的凭据尽量拷一份到我们自己的目录。
+// 直接读容器里的文件可能卡在内核里（open 不返回），所以用 cp 子进程 + 轮询目标文件，
+// 全程不 Wait —— 卡住的那个 cp 直接 Kill 掉就行。
+func ensureAuthState(cur string) (string, error) {
+	local := filepath.Join(filepath.Dir(defaultConfPath()), "auth_state")
+	if st, err := os.Stat(local); err == nil && st.Size() > 0 {
+		return local, nil
+	}
+	if cur != containerAuthState() {
+		return cur, nil // 用户自己用 URNET_AUTH_STATE 指定的，不插手
+	}
+	if err := os.MkdirAll(filepath.Dir(local), 0o700); err != nil {
+		return cur, err
+	}
+	cmd := exec.Command("/bin/cp", cur, local)
+	if err := cmd.Start(); err != nil {
+		return cur, err
+	}
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		if st, err := os.Stat(local); err == nil && st.Size() > 0 {
+			cmd.Process.Kill()
+			return local, nil
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	cmd.Process.Kill()
+	os.Remove(local)
+	return cur, errors.New("拷贝超时")
+}
+
 func defaultAuthState() string {
+	local := filepath.Join(filepath.Dir(defaultConfPath()), "auth_state")
+	if st, err := os.Stat(local); err == nil && !st.IsDir() {
+		return local
+	}
 	return filepath.Join(home(), "Library/Containers/network.ur/Data/Documents/network_spaces/ur.network/main/.by/.auth_state")
 }
 
@@ -206,4 +249,26 @@ func doUninstall() {
 	} else {
 		fmt.Println("没有安装开机自启")
 	}
+}
+
+// authStateReadable 探一下凭据文件能不能读。
+// 关键点：macOS 上跨 App 容器读文件可能卡在内核里（open 一直不返回），
+// 所以这里丢给子进程 + 超时，卡住就杀掉，主进程照常报错。
+func authStateReadable(p string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/cat", p)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return errors.New("读取超时（被系统权限拦住了）")
+	}
+	if err != nil {
+		return err
+	}
+	if buf.Len() == 0 {
+		return errors.New("文件是空的")
+	}
+	return nil
 }

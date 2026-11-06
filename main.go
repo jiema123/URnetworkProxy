@@ -121,8 +121,11 @@ func defaultBinPath() string {
 	return names[0]
 }
 
+// authStateBroken 非空表示凭据文件读不了，这时不要拉 socksproxy（它会在内核里卡死）
+var authStateBroken string
+
 // appVersion 打在 release notes 和 banner 里，方便确认对方跑的是哪个版本
-const appVersion = "1.1.5"
+const appVersion = "1.1.6"
 
 var (
 	binPath    = env("URNET_BIN", defaultBinPath())
@@ -582,6 +585,15 @@ func (s *Server) startLocked(country string) error {
 	if _, err := os.Stat(binPath); err != nil {
 		return fmt.Errorf("找不到 socksproxy: %s%s\n把 socksproxy 放到 urnetd 旁边（同一目录），或用 URNET_BIN 指定", binPath, binSearchHint())
 	}
+	if authStateBroken != "" {
+		return fmt.Errorf("凭据文件读不了（%s）。\n"+
+			"macOS 不让读另一个 App 容器里的文件，代理没法启动。解决办法：\n"+
+			"  1) Finder 里按 Cmd+Shift+G，打开 %s\n"+
+			"     把 .auth_state 复制到 %s\n"+
+			"  2) 或者给 URnetwork Console 开「完全磁盘访问」后重启 App\n"+
+			"  3) 也可以在面板「节点 → 换凭据」用一次性授权码登录",
+			authStateBroken, filepath.Dir(authState), filepath.Join(filepath.Dir(confFile), "auth_state"))
+	}
 	if _, err := os.Stat(authState); err != nil {
 		return fmt.Errorf("找不到 auth_state: %s\n%s", authState, authStateHint())
 	}
@@ -627,11 +639,17 @@ func (s *Server) startLocked(country string) error {
 
 	select {
 	case <-readyCh:
-	case <-time.After(50 * time.Second):
+	case <-time.After(25 * time.Second):
 		stopProc(cmd, true)
-		cmd.Wait()
 		pr.Close()
-		return errors.New("启动超时（50s），看日志面板" + s.tailLog(8))
+		// 不能 Wait：子进程要是卡在内核 open() 里，Wait 会跟着一起挂住
+		return errors.New("启动超时，socksproxy 没有任何输出。\n" +
+			"最常见的原因是 macOS 不让读 URnetwork App 的凭据文件（跨 App 容器权限，open 会一直卡住）。\n" +
+			"解决办法（选一个）：\n" +
+			"  1) 把下面这个文件复制到 " + filepath.Join(filepath.Dir(confFile), "auth_state") + "，再重启 App：\n" +
+			"     " + authState + "\n" +
+			"  2) 系统设置 → 隐私与安全性 → 完全磁盘访问，把 URnetwork Console 加进去并勾选\n" +
+			"  3) 面板「节点 → 换凭据」里用一次性授权码登录" + s.tailLog(8))
 	}
 
 	done := make(chan struct{})
@@ -868,6 +886,8 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 		"country":       countryLabel(s.country),
 		"best":          isBestPick(s.country),
 		"bestSupported": supportsBestAvailable(),
+		"authState":     authState,
+		"authLocal":     filepath.Join(filepath.Dir(confFile), "auth_state"),
 		"running":       s.running,
 		"ready":         s.ready,
 		"busy":          s.busy,
@@ -1595,6 +1615,17 @@ func serve() {
 		}()
 	}
 
+	// 启动时先把凭据弄到本地（macOS 跨 App 容器可能读不了）
+	authStateMissing := ""
+	if p, err := ensureAuthState(authState); err != nil {
+		authStateMissing = err.Error()
+		fmt.Printf("  提示：读不到 URnetwork App 的凭据（%v），代理可能起不来。\n  手动把 .auth_state 复制到 %s 再重启即可。\n", err, filepath.Join(filepath.Dir(confFile), "auth_state"))
+	} else if p != authState {
+		authState = p
+		fmt.Println("  凭据已复制到本地:", p)
+	}
+	authStateBroken = authStateMissing
+
 	// 启动时若端口已被外部进程占用，先接管
 	if portBusy(proxyPort) {
 		fmt.Println("  端口已被占用，尝试接管…")
@@ -2069,6 +2100,12 @@ details.howto img{display:block;width:100%;max-width:290px;border-radius:10px;
             </div>
           </div>
           <div class="field" style="border-top:1px solid var(--line);padding-top:14px">
+            <label>凭据文件（auth_state）</label>
+            <div class="uri" id="aspath" style="font-size:11px">—</div>
+            <div class="muted" style="margin-top:6px" id="ashint"></div>
+            <div class="row" style="margin-top:8px"><button class="btn" id="ascopy">打开所在文件夹</button></div>
+          </div>
+          <div class="field" style="border-top:1px solid var(--line);padding-top:14px">
             <label>进程</label>
             <div class="row"><button class="btn d" id="shutdown">停止服务并退出</button></div>
             <div class="muted" style="margin-top:6px">装过开机自启的话停掉会被拉起；要彻底停先执行 urnetd uninstall</div>
@@ -2153,6 +2190,7 @@ function paint(){
   setText('bm-region', S.country||'');
   setText('bm-toggle', online?'停止':'启动');
   setText('region-count', S.regionCount?('共 '+S.regionCount+' 个地区'):'');
+  paintAuth();
 }
 function buildHosts(){
   if(!S.addrs) return;
@@ -2283,6 +2321,22 @@ function copyText(t, btn, label){
   setTimeout(function(){btn.textContent=label},1200);
 }
 on('goto-node','click',function(){ showView('node'); });
+function paintAuth(){
+  if(!S) return;
+  setText('aspath', S.authState||'—');
+  var local = S.authLocal||'';
+  var usingLocal = local && S.authState===local;
+  setText('ashint', usingLocal
+    ? '正在用这个目录里的副本。'
+    : '如果代理一直起不来，多半是系统不让读这个文件（跨 App 容器权限）。把 .auth_state 复制到 ' + local + ' 再重启 App 即可。');
+}
+on('ascopy','click',function(){
+  if(!S) return;
+  var p = S.authLocal||S.authState||'';
+  var i = p.lastIndexOf('/');
+  var dir = i>0 ? p.slice(0,i) : p;
+  copyText(dir, this, '打开所在文件夹');
+});
 on('orb','click',async function(){
   if(!S) return;
   if(S.running) await fetch('/api/stop',{method:'POST'});

@@ -5,6 +5,9 @@ package main
 // 平台相关实现（Linux）：systemd user unit 自启、ip route 取默认网卡、xdg-open 打开链接。
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -188,3 +191,28 @@ func doUninstall() {
 		fmt.Println("没有安装开机自启")
 	}
 }
+
+// authStateReadable 探一下凭据文件能不能读。
+// 关键点：macOS 上跨 App 容器读文件可能卡在内核里（open 一直不返回），
+// 所以这里丢给子进程 + 超时，卡住就杀掉，主进程照常报错。
+func authStateReadable(p string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "/bin/cat", p)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return errors.New("读取超时（被系统权限拦住了）")
+	}
+	if err != nil {
+		return err
+	}
+	if buf.Len() == 0 {
+		return errors.New("文件是空的")
+	}
+	return nil
+}
+
+// Linux 上凭据就是普通文件，不需要拷贝
+func ensureAuthState(cur string) (string, error) { return cur, nil }

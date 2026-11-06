@@ -156,6 +156,27 @@ urnetd token import 文件      # 从别的机器拷 .auth_state 过来
 urnetd token                 # 看还剩几天
 ```
 
+## macOS 上「代理起不来」的排查
+
+面板能打开、但节点一直是「未运行」或启动超时，九成是**系统不让读 URnetwork App 的凭据文件**。
+跨 App 容器的读操作会被 macOS 拦住，`open()` 直接卡住 —— 所以进程不报错，只是一直没动静。
+
+判断方法：设置页「凭据文件」那一栏显示的路径如果是
+`~/Library/Containers/network.ur/.../.auth_state`，且代理起不来，那就是这个原因。
+
+两种解法，任选一种：
+
+1. **把凭据拷一份出来**（最快）
+   - Finder 里 `Cmd+Shift+G`，粘贴
+     `~/Library/Containers/network.ur/Data/Documents/network_spaces/ur.network/main/.by/`
+   - 把 `.auth_state` 复制到
+     `~/Library/Application Support/urnetd/auth_state`
+   - 重启 App，设置页那栏会变成这个新路径，代理就能起来了
+2. **给完全磁盘访问**：系统设置 → 隐私与安全性 → 完全磁盘访问，把 URnetwork Console 加进去并勾选
+
+只要 `~/Library/Application Support/urnetd/auth_state` 存在，App 就优先用它，
+以后哪怕 URnetwork App 重装、容器权限变来变去都不受影响。
+
 ## 出口选择
 
 - **最佳可用**：不指定国家，把选择权交回网络 —— 由它挑当前最好用的出口。面板「快速切换出口」和「地区」页都有这个入口。

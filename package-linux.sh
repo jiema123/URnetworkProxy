@@ -25,15 +25,16 @@ mkdir -p "$DIST"
 
 for arch in amd64 arm64; do
 	echo "==> 编译 linux/$arch"
-	CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "/tmp/urnetd-l-$arch" .
+	BUILD_TMP=$(mktemp -d)
+	CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "$BUILD_TMP/urnetd" .
 
 	STAGE="$DIST/stage-$arch"
 	mkdir -p "$STAGE"
-	cp "/tmp/urnetd-l-$arch" "$STAGE/urnetd"
+	cp "$BUILD_TMP/urnetd" "$STAGE/urnetd"
 
 	if [ -d "$SOCKS_SRC" ]; then
-		(cd "$SOCKS_SRC" && CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "/tmp/socks-l-$arch" .)
-		cp "/tmp/socks-l-$arch" "$STAGE/socksproxy"
+		(cd "$SOCKS_SRC" && CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "$BUILD_TMP/socksproxy" .)
+		cp "$BUILD_TMP/socksproxy" "$STAGE/socksproxy"
 	elif [ -f "$SOCKS_FALLBACK" ]; then
 		echo "    源码不在，socksproxy 为 darwin 版本，仅占位（需自行替换）"
 		cp "$SOCKS_FALLBACK" "$STAGE/socksproxy.placeholder"
@@ -172,7 +173,7 @@ UNIT
 
 	tar -czf "$DIST/urnetd-linux-$arch.tar.gz" -C "$STAGE" .
 	rm -rf "$STAGE"
-	rm -f "/tmp/urnetd-l-$arch" "/tmp/socks-l-$arch"
+	rm -rf "$BUILD_TMP" 2>/dev/null || true
 done
 
 echo

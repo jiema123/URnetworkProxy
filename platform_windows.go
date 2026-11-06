@@ -144,3 +144,18 @@ func doUninstall() {
 	}
 	fmt.Println("已移除开机启动")
 }
+
+// Windows 上就是普通文件，直接读一下即可
+func authStateReadable(p string) error {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return err
+	}
+	if len(b) == 0 {
+		return fmt.Errorf("文件是空的")
+	}
+	return nil
+}
+
+// Windows 上凭据就是普通文件，不需要拷贝
+func ensureAuthState(cur string) (string, error) { return cur, nil }
